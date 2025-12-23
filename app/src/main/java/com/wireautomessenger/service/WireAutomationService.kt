@@ -29,7 +29,7 @@ class WireAutomationService : AccessibilityService() {
 
     companion object {
         const val ACTION_SEND_MESSAGES = "com.wireautomessenger.SEND_MESSAGES"
-        const val WIRE_PACKAGE = "ch.wire"
+        const val WIRE_PACKAGE = "com.wire"
         const val NOTIFICATION_ID = 1001
         const val CHANNEL_ID = "wire_automation_channel"
         
@@ -117,9 +117,9 @@ class WireAutomationService : AccessibilityService() {
             // Launch Wire app - try multiple package names
             var wireIntent = packageManager.getLaunchIntentForPackage(WIRE_PACKAGE)
             
-            // Try alternative package names if main one fails
+            // Try alternative package names if main one fails (for compatibility)
             if (wireIntent == null) {
-                val alternativePackages = listOf("ch.wire", "com.wire", "wire")
+                val alternativePackages = listOf("com.wire", "ch.wire", "wire")
                 for (pkg in alternativePackages) {
                     wireIntent = packageManager.getLaunchIntentForPackage(pkg)
                     if (wireIntent != null) break

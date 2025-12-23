@@ -416,7 +416,7 @@ class MainActivity : AppCompatActivity() {
     
     private fun isWireAppInstalled(): Boolean {
         return try {
-            packageManager.getLaunchIntentForPackage("ch.wire") != null
+            packageManager.getLaunchIntentForPackage("com.wire") != null
         } catch (e: Exception) {
             false
         }
@@ -435,7 +435,7 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("Open Play Store") { _, _ ->
                 try {
                     val intent = Intent(Intent.ACTION_VIEW).apply {
-                        data = android.net.Uri.parse("market://details?id=ch.wire")
+                        data = android.net.Uri.parse("market://details?id=com.wire")
                         setPackage("com.android.vending")
                     }
                     startActivity(intent)
@@ -443,7 +443,7 @@ class MainActivity : AppCompatActivity() {
                     // Fallback to web browser
                     try {
                         val intent = Intent(Intent.ACTION_VIEW).apply {
-                            data = android.net.Uri.parse("https://play.google.com/store/apps/details?id=ch.wire")
+                            data = android.net.Uri.parse("https://play.google.com/store/apps/details?id=com.wire")
                         }
                         startActivity(intent)
                     } catch (e2: Exception) {
