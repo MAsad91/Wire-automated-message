@@ -260,7 +260,7 @@ class WireAutomationService : AccessibilityService() {
             // Try scrolling to load more contacts
             android.util.Log.d("WireAuto", "No contacts found, trying to scroll...")
             try {
-                performGlobalAction(GLOBAL_ACTION_SCROLL_DOWN)
+                performGlobalAction(AccessibilityService.GLOBAL_ACTION_SCROLL_DOWN)
                 delay(2000)
                 rootNode = rootInActiveWindow
                 if (rootNode != null && rootNode.packageName == WIRE_PACKAGE) {
@@ -526,7 +526,7 @@ class WireAutomationService : AccessibilityService() {
         // Remove duplicates based on node reference
         val uniqueContacts = contacts.distinctBy { 
             // Use a combination of text and position to identify unique contacts
-            "${it.text}_${it.boundsInParent}"
+            "${it.text}_${it.boundsInScreen}"
         }
         
         android.util.Log.i("WireAuto", "=== Contact detection complete: ${uniqueContacts.size} unique contacts found ===")
@@ -847,6 +847,56 @@ class WireAutomationService : AccessibilityService() {
             }
         }
         return false
+    }
+    
+    private fun findClickableNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        // Check if node itself is clickable
+        if (node.isClickable) {
+            return node
+        }
+        
+        // Check parent
+        var parent = node.parent
+        var depth = 0
+        while (parent != null && depth < 5) {
+            if (parent.isClickable) {
+                return parent
+            }
+            parent = parent.parent
+            depth++
+        }
+        
+        // Check children
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i)
+            if (child != null && child.isClickable) {
+                return child
+            }
+        }
+        
+        return null
+    }
+    
+    private fun navigateToConversationsList(root: AccessibilityNodeInfo) {
+        // Try to find and click on "Conversations" or "Chats" tab/button
+        val conversationsButton = findNodeByText(root, "Conversations")
+            ?: findNodeByText(root, "Chats")
+            ?: findNodeByText(root, "Messages")
+            ?: findNodeByContentDescription(root, "Conversations")
+            ?: findNodeByContentDescription(root, "Chats")
+        
+        if (conversationsButton != null) {
+            val clickableNode = findClickableNode(conversationsButton)
+            if (clickableNode != null) {
+                clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                android.util.Log.d("WireAuto", "Clicked on Conversations button")
+                return
+            }
+        }
+        
+        // If not found, try to find bottom navigation or tab bar
+        // Wire typically shows conversations by default, so this might not be needed
+        android.util.Log.d("WireAuto", "Conversations button not found, assuming already on conversations screen")
     }
     
     private fun isInListView(node: AccessibilityNodeInfo): Boolean {
