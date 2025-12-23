@@ -105,11 +105,22 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun checkWireAppInstalled() {
-        if (!isWireAppInstalled()) {
-            // Show a subtle warning in the UI
-            Toast.makeText(this, 
-                "⚠ Wire app not found. Please install Wire from Play Store.", 
-                Toast.LENGTH_LONG).show()
+        // Check Wire app installation status
+        val isInstalled = isWireAppInstalled()
+        
+        // Only show warning once per session to avoid annoying the user
+        val key = "wire_check_shown_${System.currentTimeMillis() / 1000 / 60}" // Once per minute
+        if (!prefs.getBoolean(key, false)) {
+            if (!isInstalled) {
+                prefs.edit().putBoolean(key, true).apply()
+                // Show a subtle warning in the UI
+                Toast.makeText(this, 
+                    "⚠ Wire app not detected. Please ensure Wire is installed from Play Store.", 
+                    Toast.LENGTH_SHORT).show()
+            } else {
+                // Log success for debugging
+                android.util.Log.d("WireCheck", "Wire app detected successfully")
+            }
         }
     }
     
@@ -160,7 +171,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showNotificationPermissionDialog() {
-        MaterialAlertDialogBuilder(this)
+        MaterialAlertDialogBuilder(this, R.style.Theme_WireAutoMessenger_Dialog)
             .setTitle(R.string.notification_permission_title)
             .setMessage(R.string.notification_permission_message)
             .setPositiveButton(R.string.notification_permission_allow) { _, _ ->
@@ -178,7 +189,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showAccessibilityPermissionDialog() {
-        MaterialAlertDialogBuilder(this)
+        MaterialAlertDialogBuilder(this, R.style.Theme_WireAutoMessenger_Dialog)
             .setTitle(R.string.permission_dialog_title)
             .setMessage(getString(R.string.permission_dialog_message) + "\n\n" +
                     "📱 For Redmi/Xiaomi Devices:\n\n" +
@@ -307,7 +318,7 @@ class MainActivity : AppCompatActivity() {
         }
         prefs.edit().putBoolean(key, true).apply()
         
-        MaterialAlertDialogBuilder(this)
+        MaterialAlertDialogBuilder(this, R.style.Theme_WireAutoMessenger_Dialog)
             .setTitle("Service Malfunctioning")
             .setMessage("The Accessibility Service is enabled but not working properly.\n\n" +
                     "To fix this:\n\n" +
@@ -416,14 +427,81 @@ class MainActivity : AppCompatActivity() {
     
     private fun isWireAppInstalled(): Boolean {
         return try {
-            packageManager.getLaunchIntentForPackage("com.wire") != null
+            val primaryPackage = "com.wire"
+            val alternativePackages = listOf("ch.wire", "wire")
+            val allPackages = listOf(primaryPackage) + alternativePackages
+            
+            // Method 1: Try to get launch intent (most reliable - works if app is enabled)
+            for (pkg in allPackages) {
+                try {
+                    val launchIntent = packageManager.getLaunchIntentForPackage(pkg)
+                    if (launchIntent != null) {
+                        android.util.Log.d("WireCheck", "Wire app found via launch intent: $pkg")
+                        return true
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.d("WireCheck", "Launch intent check failed for $pkg: ${e.message}")
+                }
+            }
+            
+            // Method 2: Try to get package info (works even if app is disabled)
+            for (pkg in allPackages) {
+                try {
+                    val packageInfo = packageManager.getPackageInfo(pkg, PackageManager.GET_ACTIVITIES)
+                    if (packageInfo != null) {
+                        android.util.Log.d("WireCheck", "Wire app found via package info: $pkg")
+                        return true
+                    }
+                } catch (e: PackageManager.NameNotFoundException) {
+                    // Package not found, continue
+                    android.util.Log.d("WireCheck", "Package not found: $pkg")
+                } catch (e: Exception) {
+                    android.util.Log.d("WireCheck", "Package info check failed for $pkg: ${e.message}")
+                }
+            }
+            
+            // Method 3: Check installed packages list (most comprehensive)
+            try {
+                val installedPackages = packageManager.getInstalledPackages(PackageManager.GET_ACTIVITIES)
+                for (pkg in allPackages) {
+                    val found = installedPackages.any { it.packageName == pkg }
+                    if (found) {
+                        android.util.Log.d("WireCheck", "Wire app found in installed packages: $pkg")
+                        return true
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("WireCheck", "Error getting installed packages: ${e.message}", e)
+            }
+            
+            // Method 4: Try with MATCH_UNINSTALLED_PACKAGES flag (for some edge cases)
+            for (pkg in allPackages) {
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        val packageInfo = packageManager.getPackageInfo(
+                            pkg, 
+                            PackageManager.PackageInfoFlags.of(PackageManager.GET_ACTIVITIES.toLong())
+                        )
+                        if (packageInfo != null) {
+                            android.util.Log.d("WireCheck", "Wire app found via PackageInfoFlags: $pkg")
+                            return true
+                        }
+                    }
+                } catch (e: Exception) {
+                    // Continue
+                }
+            }
+            
+            android.util.Log.w("WireCheck", "Wire app not found using any method")
+            false
         } catch (e: Exception) {
+            android.util.Log.e("WireCheck", "Critical error checking Wire app: ${e.message}", e)
             false
         }
     }
     
     private fun showWireNotInstalledDialog() {
-        MaterialAlertDialogBuilder(this)
+        MaterialAlertDialogBuilder(this, R.style.Theme_WireAutoMessenger_Dialog)
             .setTitle("Wire App Not Found")
             .setMessage("Wire app is not installed on your device.\n\n" +
                     "To use this app:\n\n" +

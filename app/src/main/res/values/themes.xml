@@ -30,4 +30,17 @@
         <!-- Other -->
         <item name="android:navigationBarColor">@color/surface</item>
     </style>
+    
+    <!-- Light Dialog Theme -->
+    <style name="Theme.WireAutoMessenger.Dialog" parent="ThemeOverlay.Material3.Dialog">
+        <item name="colorSurface">@color/surface</item>
+        <item name="colorOnSurface">@color/on_surface</item>
+        <item name="android:textColorPrimary">@color/on_surface</item>
+        <item name="android:textColorSecondary">@color/on_surface_variant</item>
+        <item name="android:background">@color/surface</item>
+        <item name="materialAlertDialogBackgroundColor">@color/surface</item>
+        <item name="materialAlertDialogTitleTextColor">@color/on_surface</item>
+        <item name="materialAlertDialogBodyTextColor">@color/on_surface</item>
+        <item name="buttonBarButtonStyle">@style/Widget.Material3.Button.TextButton</item>
+    </style>
 </resources>

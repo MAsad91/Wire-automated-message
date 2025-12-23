@@ -3,6 +3,8 @@ package com.wireautomessenger.service
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
+import android.content.pm.PackageManager.NameNotFoundException
 import android.os.Build
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -114,25 +116,81 @@ class WireAutomationService : AccessibilityService() {
             updateNotification("Opening Wire app...")
             sendProgressBroadcast("Opening Wire app...")
             
-            // Launch Wire app - try multiple package names
-            var wireIntent = packageManager.getLaunchIntentForPackage(WIRE_PACKAGE)
+            // Launch Wire app - try multiple methods and package names
+            var wireIntent: Intent? = null
+            var foundPackage: String? = null
             
-            // Try alternative package names if main one fails (for compatibility)
-            if (wireIntent == null) {
-                val alternativePackages = listOf("com.wire", "ch.wire", "wire")
-                for (pkg in alternativePackages) {
+            val allPackages = listOf(WIRE_PACKAGE, "com.wire", "ch.wire", "wire")
+            
+            // Method 1: Try to get launch intent (most reliable)
+            for (pkg in allPackages) {
+                try {
                     wireIntent = packageManager.getLaunchIntentForPackage(pkg)
-                    if (wireIntent != null) break
+                    if (wireIntent != null) {
+                        foundPackage = pkg
+                        android.util.Log.d("WireLaunch", "Found Wire app with package: $pkg (launch intent)")
+                        break
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.d("WireLaunch", "Launch intent check failed for $pkg: ${e.message}")
                 }
             }
             
-            if (wireIntent != null) {
+            // Method 2: Check if package exists (even if disabled)
+            if (wireIntent == null) {
+                for (pkg in allPackages) {
+                    try {
+                        val packageInfo = packageManager.getPackageInfo(pkg, PackageManager.GET_ACTIVITIES)
+                        if (packageInfo != null) {
+                            // Package exists, try to get launch intent again
+                            wireIntent = packageManager.getLaunchIntentForPackage(pkg)
+                            if (wireIntent != null) {
+                                foundPackage = pkg
+                                android.util.Log.d("WireLaunch", "Found Wire app with package: $pkg (package info)")
+                                break
+                            } else {
+                                android.util.Log.w("WireLaunch", "Wire package $pkg exists but has no launch intent (may be disabled)")
+                            }
+                        }
+                    } catch (e: PackageManager.NameNotFoundException) {
+                        // Package doesn't exist, continue
+                    } catch (e: Exception) {
+                        android.util.Log.d("WireLaunch", "Package info check failed for $pkg: ${e.message}")
+                    }
+                }
+            }
+            
+            // Method 3: Check installed packages list as last resort
+            if (wireIntent == null) {
+                try {
+                    val installedPackages = packageManager.getInstalledPackages(PackageManager.GET_ACTIVITIES)
+                    for (pkg in allPackages) {
+                        val found = installedPackages.any { it.packageName == pkg }
+                        if (found) {
+                            // Try one more time to get launch intent
+                            wireIntent = packageManager.getLaunchIntentForPackage(pkg)
+                            if (wireIntent != null) {
+                                foundPackage = pkg
+                                android.util.Log.d("WireLaunch", "Found Wire app with package: $pkg (installed packages list)")
+                                break
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("WireLaunch", "Error checking installed packages: ${e.message}", e)
+                }
+            }
+            
+            if (wireIntent != null && foundPackage != null) {
                 wireIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                android.util.Log.i("WireLaunch", "Launching Wire app with package: $foundPackage")
                 startActivity(wireIntent)
                 delay(3000) // Wait for app to open
             } else {
+                val errorMsg = "Wire app not found. Please ensure Wire app is installed from Google Play Store (package: com.wire) and try again."
+                android.util.Log.e("WireLaunch", errorMsg)
                 updateNotification("Wire app not found")
-                sendErrorBroadcast("Wire app not found. Please install Wire app from Google Play Store and ensure you're logged in.")
+                sendErrorBroadcast(errorMsg)
                 isRunning.set(false)
                 return
             }
