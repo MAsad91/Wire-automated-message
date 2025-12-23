@@ -102,12 +102,20 @@ class MainActivity : AppCompatActivity() {
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.permission_dialog_title)
             .setMessage(getString(R.string.permission_dialog_message) + "\n\n" +
-                    "Steps:\n" +
+                    "📱 For Redmi/Xiaomi Devices:\n\n" +
                     "1. Tap 'Enable Now' below\n" +
-                    "2. Find 'Wire Auto Messenger' in the list\n" +
-                    "3. Toggle the switch ON\n" +
-                    "4. Tap 'Allow' on the warning dialog\n" +
-                    "5. Return to this app")
+                    "2. You'll see Accessibility Settings\n" +
+                    "3. Look for 'Downloaded apps' or 'Installed services'\n" +
+                    "4. Find 'Wire Auto Messenger' in that list\n" +
+                    "5. Tap on 'Wire Auto Messenger'\n" +
+                    "6. Toggle the switch ON\n" +
+                    "7. If you see 'Restricted Settings' blocking access:\n" +
+                    "   → Go to Settings → Apps → Restricted Settings\n" +
+                    "   → Allow 'Wire Auto Messenger'\n" +
+                    "   → Then enable Accessibility Service again\n" +
+                    "8. Tap 'Allow' or 'OK' on the warning\n" +
+                    "9. Return to this app\n\n" +
+                    "⚠️ Important: If blocked by Restricted Settings, allow it first!")
             .setPositiveButton(R.string.permission_dialog_positive) { _, _ ->
                 openAccessibilityServiceSettings()
             }
@@ -147,20 +155,62 @@ class MainActivity : AppCompatActivity() {
         val accessibilityManager = getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
         val enabledServices = accessibilityManager.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
         
-        val isEnabled = enabledServices.any { service ->
+        // Check by package name
+        var isEnabled = enabledServices.any { service ->
             service.resolveInfo.serviceInfo.packageName == packageName
         }
+        
+        // Also check by service name for better compatibility
+        if (!isEnabled) {
+            isEnabled = enabledServices.any { service ->
+                service.resolveInfo.serviceInfo.name == "com.wireautomessenger.service.WireAutomationService" ||
+                service.resolveInfo.serviceInfo.name.contains("WireAutomationService", ignoreCase = true)
+            }
+        }
+        
+        // Check if service is malfunctioning (enabled but not working)
+        var isMalfunctioning = false
+        if (isEnabled) {
+            try {
+                // Try to get service info to check if it's actually working
+                val serviceInfo = enabledServices.firstOrNull { service ->
+                    service.resolveInfo.serviceInfo.packageName == packageName ||
+                    service.resolveInfo.serviceInfo.name.contains("WireAutomationService", ignoreCase = true)
+                }
+                
+                // If service is enabled but we can't access it properly, it might be malfunctioning
+                if (serviceInfo == null) {
+                    isMalfunctioning = true
+                }
+            } catch (e: Exception) {
+                // If we get an error checking the service, it might be malfunctioning
+                isMalfunctioning = true
+            }
+        }
+        
+        // Debug: Log all enabled services (for troubleshooting)
+        if (!isEnabled && enabledServices.isNotEmpty()) {
+            android.util.Log.d("AccessibilityCheck", "Enabled services: ${enabledServices.map { it.resolveInfo.serviceInfo.packageName + "/" + it.resolveInfo.serviceInfo.name }}")
+        }
 
-        updateAccessibilityStatus(isEnabled)
+        updateAccessibilityStatus(isEnabled, isMalfunctioning)
     }
 
-    private fun updateAccessibilityStatus(isEnabled: Boolean) {
-        if (isEnabled) {
+    private fun updateAccessibilityStatus(isEnabled: Boolean, isMalfunctioning: Boolean = false) {
+        if (isEnabled && !isMalfunctioning) {
             tvAccessibilityStatus.text = "✓ Enabled"
             tvAccessibilityStatus.setTextColor(getColor(R.color.on_success))
             tvAccessibilityStatus.setBackgroundResource(R.drawable.status_badge_success)
             btnEnableAccessibility.text = "Service Enabled"
             btnEnableAccessibility.isEnabled = false
+        } else if (isMalfunctioning) {
+            tvAccessibilityStatus.text = "⚠ Malfunctioning"
+            tvAccessibilityStatus.setTextColor(getColor(R.color.on_error))
+            tvAccessibilityStatus.setBackgroundResource(R.drawable.status_badge_error)
+            btnEnableAccessibility.text = "Fix Service"
+            btnEnableAccessibility.isEnabled = true
+            // Show helpful dialog
+            showMalfunctioningDialog()
         } else {
             tvAccessibilityStatus.text = "✗ Not Enabled"
             tvAccessibilityStatus.setTextColor(getColor(R.color.on_error))
@@ -168,6 +218,32 @@ class MainActivity : AppCompatActivity() {
             btnEnableAccessibility.text = "Enable Accessibility Service"
             btnEnableAccessibility.isEnabled = true
         }
+    }
+    
+    private fun showMalfunctioningDialog() {
+        // Only show once per session to avoid annoying the user
+        val key = "malfunction_dialog_shown_${System.currentTimeMillis() / 1000 / 60}" // Show once per minute
+        if (prefs.getBoolean(key, false)) {
+            return
+        }
+        prefs.edit().putBoolean(key, true).apply()
+        
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Service Malfunctioning")
+            .setMessage("The Accessibility Service is enabled but not working properly.\n\n" +
+                    "To fix this:\n\n" +
+                    "1. Go to Settings → Accessibility\n" +
+                    "2. Find 'Wire Auto Messenger'\n" +
+                    "3. Toggle it OFF, wait 5 seconds\n" +
+                    "4. Toggle it ON again\n" +
+                    "5. Return to this app\n\n" +
+                    "This usually fixes the issue.")
+            .setPositiveButton("Open Settings") { _, _ ->
+                openAccessibilityServiceSettings()
+            }
+            .setNegativeButton("Later", null)
+            .setCancelable(true)
+            .show()
     }
 
     private fun loadSavedMessage() {
@@ -347,9 +423,20 @@ class MainActivity : AppCompatActivity() {
         val accessibilityManager = getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
         val enabledServices = accessibilityManager.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
         
-        return enabledServices.any { service ->
+        // Check by package name
+        var isEnabled = enabledServices.any { service ->
             service.resolveInfo.serviceInfo.packageName == packageName
         }
+        
+        // Also check by service name for better compatibility
+        if (!isEnabled) {
+            isEnabled = enabledServices.any { service ->
+                service.resolveInfo.serviceInfo.name == "com.wireautomessenger.service.WireAutomationService" ||
+                service.resolveInfo.serviceInfo.name.contains("WireAutomationService", ignoreCase = true)
+            }
+        }
+        
+        return isEnabled
     }
 
     override fun onResume() {

@@ -35,27 +35,55 @@ class WireAutomationService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        createNotificationChannel()
+        try {
+            createNotificationChannel()
+        } catch (e: Exception) {
+            // Log error but don't crash the service
+            e.printStackTrace()
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         // Handle events if needed for automation
+        // This method must not throw exceptions
+        try {
+            // Event handling can be added here if needed
+        } catch (e: Exception) {
+            // Silently handle any errors
+            e.printStackTrace()
+        }
     }
 
     override fun onInterrupt() {
         // Service interrupted
+        // This method must not throw exceptions
+        try {
+            isRunning.set(false)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_SEND_MESSAGES) {
-            if (!isRunning.get()) {
-                startForeground(NOTIFICATION_ID, createNotification("Starting automation..."))
-                scope.launch {
-                    sendMessagesToAllContacts()
+        return try {
+            if (intent?.action == ACTION_SEND_MESSAGES) {
+                if (!isRunning.get()) {
+                    try {
+                        startForeground(NOTIFICATION_ID, createNotification("Starting automation..."))
+                    } catch (e: Exception) {
+                        // If foreground service fails, continue anyway
+                        e.printStackTrace()
+                    }
+                    scope.launch {
+                        sendMessagesToAllContacts()
+                    }
                 }
             }
+            START_NOT_STICKY
+        } catch (e: Exception) {
+            e.printStackTrace()
+            START_NOT_STICKY
         }
-        return START_NOT_STICKY
     }
 
     private suspend fun sendMessagesToAllContacts() {
@@ -333,16 +361,27 @@ class WireAutomationService : AccessibilityService() {
     }
 
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = android.app.NotificationChannel(
-                CHANNEL_ID,
-                "Wire Automation",
-                android.app.NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Notifications for Wire message automation"
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val notificationManager = getSystemService(android.app.NotificationManager::class.java)
+                if (notificationManager != null) {
+                    // Check if channel already exists
+                    val existingChannel = notificationManager.getNotificationChannel(CHANNEL_ID)
+                    if (existingChannel == null) {
+                        val channel = android.app.NotificationChannel(
+                            CHANNEL_ID,
+                            "Wire Automation",
+                            android.app.NotificationManager.IMPORTANCE_LOW
+                        ).apply {
+                            description = "Notifications for Wire message automation"
+                        }
+                        notificationManager.createNotificationChannel(channel)
+                    }
+                }
             }
-            val notificationManager = getSystemService(android.app.NotificationManager::class.java)
-            notificationManager.createNotificationChannel(channel)
+        } catch (e: Exception) {
+            // Don't crash if notification channel creation fails
+            e.printStackTrace()
         }
     }
 
@@ -357,8 +396,13 @@ class WireAutomationService : AccessibilityService() {
     }
 
     private fun updateNotification(text: String) {
-        val notification = createNotification(text)
-        NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification)
+        try {
+            val notification = createNotification(text)
+            NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification)
+        } catch (e: Exception) {
+            // Don't crash if notification fails
+            e.printStackTrace()
+        }
     }
 }
 
