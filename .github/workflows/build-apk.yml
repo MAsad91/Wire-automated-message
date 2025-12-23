@@ -23,12 +23,15 @@ jobs:
       run: chmod +x gradlew || true
     
     - name: Setup Android SDK
-      uses: android-actions/setup-android@v2
+      uses: android-actions/setup-android@v3
     
     - name: Build APK
       run: |
         chmod +x gradlew
         ./gradlew assembleRelease --no-daemon
+      env:
+        ANDROID_HOME: ${{ env.ANDROID_HOME }}
+        ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
     
     - name: Upload APK
       uses: actions/upload-artifact@v3
