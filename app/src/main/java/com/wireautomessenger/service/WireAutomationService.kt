@@ -114,15 +114,25 @@ class WireAutomationService : AccessibilityService() {
             updateNotification("Opening Wire app...")
             sendProgressBroadcast("Opening Wire app...")
             
-            // Launch Wire app
-            val wireIntent = packageManager.getLaunchIntentForPackage(WIRE_PACKAGE)
+            // Launch Wire app - try multiple package names
+            var wireIntent = packageManager.getLaunchIntentForPackage(WIRE_PACKAGE)
+            
+            // Try alternative package names if main one fails
+            if (wireIntent == null) {
+                val alternativePackages = listOf("ch.wire", "com.wire", "wire")
+                for (pkg in alternativePackages) {
+                    wireIntent = packageManager.getLaunchIntentForPackage(pkg)
+                    if (wireIntent != null) break
+                }
+            }
+            
             if (wireIntent != null) {
                 wireIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 startActivity(wireIntent)
                 delay(3000) // Wait for app to open
             } else {
                 updateNotification("Wire app not found")
-                sendErrorBroadcast("Wire app not found. Please install Wire app first.")
+                sendErrorBroadcast("Wire app not found. Please install Wire app from Google Play Store and ensure you're logged in.")
                 isRunning.set(false)
                 return
             }

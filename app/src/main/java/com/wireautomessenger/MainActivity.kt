@@ -88,6 +88,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         checkAccessibilityService()
+        checkWireAppInstalled()
         updateScheduleStatus()
         
         // Check if sending was completed while app was in background
@@ -100,6 +101,15 @@ class MainActivity : AppCompatActivity() {
             } else {
                 resetSendingUI()
             }
+        }
+    }
+    
+    private fun checkWireAppInstalled() {
+        if (!isWireAppInstalled()) {
+            // Show a subtle warning in the UI
+            Toast.makeText(this, 
+                "⚠ Wire app not found. Please install Wire from Play Store.", 
+                Toast.LENGTH_LONG).show()
         }
     }
     
@@ -386,6 +396,12 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, getString(R.string.accessibility_not_enabled), Toast.LENGTH_LONG).show()
             return
         }
+        
+        // Check if Wire app is installed
+        if (!isWireAppInstalled()) {
+            showWireNotInstalledDialog()
+            return
+        }
 
         val message = etMessage.text?.toString()?.trim() ?: ""
         if (message.isEmpty()) {
@@ -396,6 +412,48 @@ class MainActivity : AppCompatActivity() {
 
         saveMessage()
         startMessageSending(message)
+    }
+    
+    private fun isWireAppInstalled(): Boolean {
+        return try {
+            packageManager.getLaunchIntentForPackage("ch.wire") != null
+        } catch (e: Exception) {
+            false
+        }
+    }
+    
+    private fun showWireNotInstalledDialog() {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Wire App Not Found")
+            .setMessage("Wire app is not installed on your device.\n\n" +
+                    "To use this app:\n\n" +
+                    "1. Install Wire app from Google Play Store\n" +
+                    "2. Open Wire and create/login to your account\n" +
+                    "3. Add contacts in Wire\n" +
+                    "4. Return to this app and try again\n\n" +
+                    "The app requires Wire to be installed and logged in.")
+            .setPositiveButton("Open Play Store") { _, _ ->
+                try {
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        data = android.net.Uri.parse("market://details?id=ch.wire")
+                        setPackage("com.android.vending")
+                    }
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    // Fallback to web browser
+                    try {
+                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                            data = android.net.Uri.parse("https://play.google.com/store/apps/details?id=ch.wire")
+                        }
+                        startActivity(intent)
+                    } catch (e2: Exception) {
+                        Toast.makeText(this, "Please install Wire app from Google Play Store", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .setCancelable(true)
+            .show()
     }
 
     private fun startMessageSending(message: String) {
