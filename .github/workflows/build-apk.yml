@@ -43,9 +43,11 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: app-release-apk
-        path: app/build/outputs/apk/**/*.apk
+        path: |
+          app/build/outputs/apk/release/*.apk
+          app/build/outputs/apk/**/*.apk
         retention-days: 30
-        if-no-files-found: warn
+        if-no-files-found: error
     
     - name: Upload APK as Release Asset (Optional)
       if: github.event_name == 'workflow_dispatch'
