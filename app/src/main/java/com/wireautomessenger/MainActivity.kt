@@ -3,6 +3,8 @@ package com.wireautomessenger
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.View
@@ -11,11 +13,15 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.switchmaterial.SwitchMaterial
 import com.google.android.material.textfield.TextInputEditText
 import com.wireautomessenger.service.WireAutomationService
@@ -38,15 +44,85 @@ class MainActivity : AppCompatActivity() {
         getSharedPreferences("WireAutoMessenger", Context.MODE_PRIVATE)
     }
 
+    companion object {
+        private const val PERMISSION_REQUEST_CODE = 100
+        private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 101
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
         initViews()
+        requestPermissions()
         checkAccessibilityService()
         loadSavedMessage()
         setupListeners()
         updateScheduleStatus()
+    }
+
+    private fun requestPermissions() {
+        // Request notification permission for Android 13+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+                showNotificationPermissionDialog()
+            }
+        }
+
+        // Check if Accessibility Service is enabled, if not show dialog on first launch
+        if (!isAccessibilityServiceEnabled()) {
+            val isFirstLaunch = prefs.getBoolean("first_launch", true)
+            if (isFirstLaunch) {
+                prefs.edit().putBoolean("first_launch", false).apply()
+                showAccessibilityPermissionDialog()
+            }
+        }
+    }
+
+    private fun showNotificationPermissionDialog() {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.notification_permission_title)
+            .setMessage(R.string.notification_permission_message)
+            .setPositiveButton(R.string.notification_permission_allow) { _, _ ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    ActivityCompat.requestPermissions(
+                        this,
+                        arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                        NOTIFICATION_PERMISSION_REQUEST_CODE
+                    )
+                }
+            }
+            .setNegativeButton(R.string.notification_permission_skip, null)
+            .setCancelable(true)
+            .show()
+    }
+
+    private fun showAccessibilityPermissionDialog() {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.permission_dialog_title)
+            .setMessage(R.string.permission_dialog_message)
+            .setPositiveButton(R.string.permission_dialog_positive) { _, _ ->
+                openAccessibilitySettings()
+            }
+            .setNegativeButton(R.string.permission_dialog_negative, null)
+            .setCancelable(false)
+            .show()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        when (requestCode) {
+            NOTIFICATION_PERMISSION_REQUEST_CODE -> {
+                if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                    Toast.makeText(this, "Notification permission granted", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
     }
 
     private fun initViews() {
