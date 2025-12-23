@@ -263,8 +263,13 @@ class WireAutomationService : AccessibilityService() {
                 // Find scrollable view and scroll down
                 val scrollableView = findScrollableView(rootNode)
                 if (scrollableView != null) {
-                    scrollableView.performAction(AccessibilityNodeInfo.ACTION_SCROLL_DOWN)
-                    android.util.Log.d("WireAuto", "Scrolled down in scrollable view")
+                    // Use ACTION_SCROLL_FORWARD to scroll down in vertical lists
+                    val scrolled = scrollableView.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                    if (scrolled) {
+                        android.util.Log.d("WireAuto", "Scrolled down in scrollable view")
+                    } else {
+                        android.util.Log.w("WireAuto", "Scroll action failed")
+                    }
                 } else {
                     android.util.Log.w("WireAuto", "No scrollable view found for scrolling")
                 }
