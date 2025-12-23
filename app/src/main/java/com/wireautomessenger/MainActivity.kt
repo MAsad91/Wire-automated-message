@@ -88,6 +88,8 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         checkAccessibilityService()
+        updateScheduleStatus()
+        
         // Check if sending was completed while app was in background
         val sendingComplete = prefs.getBoolean("sending_complete", false)
         if (sendingComplete && llProgress.visibility == View.VISIBLE) {
@@ -570,20 +572,4 @@ class MainActivity : AppCompatActivity() {
         return isEnabled
     }
 
-    override fun onResume() {
-        super.onResume()
-        checkAccessibilityService()
-        updateScheduleStatus()
-        
-        // Check if sending completed
-        val sendingComplete = prefs.getBoolean("sending_complete", false)
-        if (sendingComplete) {
-            llProgress.visibility = View.GONE
-            tvStatus.text = getString(R.string.messages_sent)
-            tvStatus.visibility = View.VISIBLE
-            btnSendNow.isEnabled = true
-            switchSchedule.isEnabled = true
-            prefs.edit().putBoolean("sending_complete", false).apply()
-        }
-    }
 }
