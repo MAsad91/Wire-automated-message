@@ -618,18 +618,58 @@ class MainActivity : AppCompatActivity() {
     private fun onSendingError(errorMessage: String) {
         runOnUiThread {
             // Update UI
+            llProgress.visibility = View.GONE
             progressBar.visibility = View.GONE
-            tvStatus.text = "✗ Error: $errorMessage"
+            btnSendNow.isEnabled = true
+            switchSchedule.isEnabled = true
+            
+            // Show short status
+            tvStatus.text = "✗ Error occurred - see details"
             tvStatus.setTextColor(getColor(R.color.on_error))
+            tvStatus.visibility = View.VISIBLE
             
-            // Show error message
-            Toast.makeText(this, "Error: $errorMessage", Toast.LENGTH_LONG).show()
-            
-            // Reset UI after 3 seconds
-            btnSendNow.postDelayed({
-                resetSendingUI()
-            }, 3000)
+            // Show detailed error dialog with scrollable text
+            showDetailedErrorDialog(errorMessage)
         }
+    }
+    
+    private fun showDetailedErrorDialog(errorMessage: String) {
+        val scrollView = android.widget.ScrollView(this).apply {
+            layoutParams = android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            setPadding(32, 16, 32, 16)
+        }
+        
+        val textView = TextView(this).apply {
+            text = errorMessage
+            textSize = 14f
+            setTextColor(getColor(R.color.on_surface))
+            setPadding(0, 0, 0, 16)
+        }
+        
+        scrollView.addView(textView)
+        
+        MaterialAlertDialogBuilder(this, R.style.Theme_WireAutoMessenger_Dialog)
+            .setTitle("⚠️ Error Details")
+            .setView(scrollView)
+            .setPositiveButton("OK") { _, _ ->
+                resetSendingUI()
+            }
+            .setNegativeButton("Copy Info") { _, _ ->
+                // Copy error message to clipboard
+                val clipboard = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                val clip = android.content.ClipData.newPlainText("Error Details", errorMessage)
+                clipboard.setPrimaryClip(clip)
+                Toast.makeText(this, "Error details copied to clipboard", Toast.LENGTH_SHORT).show()
+                resetSendingUI()
+            }
+            .setCancelable(true)
+            .setOnCancelListener {
+                resetSendingUI()
+            }
+            .show()
     }
     
     private fun resetSendingUI() {

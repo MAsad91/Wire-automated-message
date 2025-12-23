@@ -213,100 +213,213 @@ class WireAutomationService : AccessibilityService() {
 
     private suspend fun navigateAndSendMessages(message: String) {
         var contactsProcessed = 0
+        var contactsSent = 0
         val maxContacts = 500 // Safety limit
         
-        updateNotification("Navigating to contacts...")
-        sendProgressBroadcast("Navigating to contacts...")
-        delay(2000)
+        updateNotification("Waiting for Wire app to load...")
+        sendProgressBroadcast("Waiting for Wire app to load...")
+        delay(4000) // Give Wire more time to fully load
 
-        // Try to find and click on contacts/conversations tab
-        // This will vary based on Wire's UI structure
-        val rootNode = rootInActiveWindow
-        if (rootNode == null) {
-            sendErrorBroadcast("Could not access Wire app window. Please ensure Wire app is open and try again.")
-            return
-        }
-
-        // Look for contacts list or conversations
-        val contactsList = findContactsList(rootNode)
-        
-        if (contactsList == null) {
-            // Try to navigate to contacts
-            navigateToContacts(rootNode)
+        // Ensure we're in Wire app - check package name
+        var rootNode = rootInActiveWindow
+        if (rootNode == null || rootNode.packageName != WIRE_PACKAGE) {
+            // Wait a bit more and check again
             delay(2000)
+            rootNode = rootInActiveWindow
+            if (rootNode == null || rootNode.packageName != WIRE_PACKAGE) {
+                sendErrorBroadcast("Could not access Wire app. Please ensure Wire is open and try again.")
+                return
+            }
         }
 
-        // Get all contact items - refresh root node after navigation
-        val currentRoot = rootInActiveWindow
-        if (currentRoot == null) {
-            sendErrorBroadcast("Could not access Wire app window. Please ensure Wire app is open and try again.")
+        updateNotification("Navigating to conversations...")
+        sendProgressBroadcast("Navigating to conversations...")
+        
+        // Try to navigate to conversations/contacts list
+        // Wire typically shows conversations by default, but we need to ensure we're on the right screen
+        navigateToConversationsList(rootNode)
+        delay(3000) // Wait for navigation
+
+        // Refresh root after navigation
+        rootNode = rootInActiveWindow
+        if (rootNode == null || rootNode.packageName != WIRE_PACKAGE) {
+            sendErrorBroadcast("Lost access to Wire app. Please try again.")
             return
         }
         
-        val contactItems = getAllContactItems(currentRoot)
+        // Log UI structure for debugging
+        android.util.Log.d("WireAuto", "Wire app UI structure:")
+        android.util.Log.d("WireAuto", "Root className: ${rootNode.className}")
+        android.util.Log.d("WireAuto", "Root childCount: ${rootNode.childCount}")
+        logUIStructure(rootNode, 0, 3) // Log first 3 levels
+        
+        // Get all contact/conversation items
+        var contactItems = getAllContactItems(rootNode)
         
         if (contactItems.isEmpty()) {
-            updateNotification("No contacts found")
-            sendErrorBroadcast("No contacts found in Wire app. Please ensure you have contacts and try again.")
-            return
+            // Try scrolling to load more contacts
+            android.util.Log.d("WireAuto", "No contacts found, trying to scroll...")
+            try {
+                performGlobalAction(GLOBAL_ACTION_SCROLL_DOWN)
+                delay(2000)
+                rootNode = rootInActiveWindow
+                if (rootNode != null && rootNode.packageName == WIRE_PACKAGE) {
+                    contactItems = getAllContactItems(rootNode)
+                    if (contactItems.isNotEmpty()) {
+                        android.util.Log.d("WireAuto", "Found ${contactItems.size} contacts after scrolling")
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("WireAuto", "Error scrolling: ${e.message}")
+            }
+            
+            // Try one more time if still empty - wait longer for Wire to load
+            if (contactItems.isEmpty()) {
+                android.util.Log.w("WireAuto", "No contacts found, waiting longer and trying again...")
+                delay(3000)
+                rootNode = rootInActiveWindow
+                if (rootNode != null && rootNode.packageName == WIRE_PACKAGE) {
+                    contactItems = getAllContactItems(rootNode)
+                    android.util.Log.d("WireAuto", "After longer wait: ${contactItems.size} contacts found")
+                }
+            }
+            
+            if (contactItems.isEmpty()) {
+                // Collect debug info about what we found
+                val debugInfo = collectDebugInfo(rootNode)
+                
+                val errorMsg = "No contacts found in Wire app.\n\n" +
+                        "📋 Troubleshooting Steps:\n\n" +
+                        "1. Open Wire app manually first\n" +
+                        "2. Go to the Conversations/Chats screen\n" +
+                        "3. Make sure you can see your contacts/conversations\n" +
+                        "4. Return to this app and try again\n\n" +
+                        "💡 Tips:\n" +
+                        "- Wire must be on the main conversations screen\n" +
+                        "- You need active conversations with contacts\n" +
+                        "- Try scrolling in Wire to load all conversations\n\n" +
+                        "🔍 Debug Info:\n" +
+                        debugInfo
+                
+                updateNotification("No contacts found - see details in app")
+                sendErrorBroadcast(errorMsg)
+                return
+            }
         }
         
-        updateNotification("Found ${contactItems.size} contacts. Sending messages...")
-        sendProgressBroadcast("Found ${contactItems.size} contacts. Sending messages...")
+        val totalContacts = contactItems.size
+        android.util.Log.i("WireAuto", "Starting to send messages to $totalContacts contacts")
+        updateNotification("Found $totalContacts contacts. Sending messages...")
+        sendProgressBroadcast("Found $totalContacts contacts. Sending messages...", 0)
 
-        for ((index, contactNode) in contactItems.withIndex()) {
+        // Process contacts
+        val contactsToProcess = contactItems.toList() // Create a copy to avoid modification issues
+        for ((index, contactNode) in contactsToProcess.withIndex()) {
             if (contactsProcessed >= maxContacts) break
             
             try {
-                // Click on contact
+                contactsProcessed++
+                val contactName = contactNode.text?.toString() ?: "Contact $contactsProcessed"
+                android.util.Log.d("WireAuto", "Processing contact $contactsProcessed: $contactName")
+                
+                updateNotification("Sending to contact $contactsProcessed/$totalContacts...")
+                sendProgressBroadcast("Sending to contact $contactsProcessed/$totalContacts...", contactsSent)
+                
+                // Ensure we're still in Wire app
+                var currentRoot = rootInActiveWindow
+                if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
+                    android.util.Log.w("WireAuto", "Not in Wire app, skipping contact")
+                    continue
+                }
+                
+                // Click on contact - try multiple methods
+                var clicked = false
                 if (contactNode.isClickable) {
                     contactNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    delay(1500) // Wait for conversation to open
+                    clicked = true
                 } else {
-                    // Try to find clickable parent
-                    var parent = contactNode.parent
-                    var attempts = 0
-                    while (parent != null && attempts < 5) {
-                        if (parent.isClickable) {
-                            parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            delay(1500)
-                            break
-                        }
-                        parent = parent.parent
-                        attempts++
+                    // Try to find clickable parent or child
+                    var nodeToClick = findClickableNode(contactNode)
+                    if (nodeToClick != null) {
+                        nodeToClick.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        clicked = true
                     }
                 }
-
-                // Find message input field
-                val messageInput = findMessageInput(rootInActiveWindow ?: continue)
-                if (messageInput != null) {
-                    // Type message
-                    val bundle = android.os.Bundle()
-                    bundle.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, message)
-                    messageInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
-                    delay(500)
-
-                    // Find and click send button
-                    val sendButton = findSendButton(rootInActiveWindow ?: continue)
-                    if (sendButton != null) {
-                        sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                        delay(1000)
-                        contactsProcessed++
-                        
-                        updateNotification("Sent to $contactsProcessed contacts...")
-                        sendProgressBroadcast("Sent to $contactsProcessed contacts...", contactsProcessed)
-                    }
+                
+                if (!clicked) {
+                    android.util.Log.w("WireAuto", "Could not click contact, skipping")
+                    continue
                 }
+                
+                delay(2000) // Wait for conversation to open
+
+                // Verify we're in conversation view
+                currentRoot = rootInActiveWindow
+                if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
+                    android.util.Log.w("WireAuto", "Not in Wire app after clicking contact")
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    delay(1000)
+                    continue
+                }
+
+                // Find message input field - try multiple methods
+                val messageInput = findMessageInput(currentRoot)
+                if (messageInput == null) {
+                    android.util.Log.w("WireAuto", "Message input not found for contact $contactsProcessed")
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    delay(1000)
+                    continue
+                }
+
+                // Clear any existing text first
+                try {
+                    messageInput.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                    delay(300)
+                    messageInput.performAction(AccessibilityNodeInfo.ACTION_CLEAR_SELECTION)
+                    delay(200)
+                } catch (e: Exception) {
+                    // Ignore if clear doesn't work
+                }
+
+                // Type message
+                val bundle = android.os.Bundle()
+                bundle.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, message)
+                messageInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
+                delay(800) // Wait for text to be set
+
+                // Find and click send button
+                currentRoot = rootInActiveWindow
+                val sendButton = findSendButton(currentRoot ?: continue)
+                if (sendButton == null) {
+                    android.util.Log.w("WireAuto", "Send button not found for contact $contactsProcessed")
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    delay(1000)
+                    continue
+                }
+
+                // Click send button
+                sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                delay(1500) // Wait for message to send
+                
+                contactsSent++
+                android.util.Log.i("WireAuto", "✓ Message sent to contact $contactsSent: $contactName")
+                
+                updateNotification("Sent to $contactsSent/$totalContacts contacts...")
+                sendProgressBroadcast("Sent to $contactsSent/$totalContacts contacts...", contactsSent)
 
                 // Go back to contacts list
                 performGlobalAction(GLOBAL_ACTION_BACK)
-                delay(1000)
+                delay(1500) // Wait to return to list
 
             } catch (e: Exception) {
-                e.printStackTrace()
-                // Continue with next contact
-                performGlobalAction(GLOBAL_ACTION_BACK)
-                delay(1000)
+                android.util.Log.e("WireAuto", "Error processing contact $contactsProcessed: ${e.message}", e)
+                // Try to go back and continue
+                try {
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    delay(1000)
+                } catch (e2: Exception) {
+                    // Ignore
+                }
             }
         }
 
@@ -314,16 +427,26 @@ class WireAutomationService : AccessibilityService() {
         prefs.edit()
             .putLong("last_send_time", System.currentTimeMillis())
             .putBoolean("sending_complete", true)
+            .putInt("last_contacts_sent", contactsSent)
             .apply()
         
-        updateNotification("Completed! Sent to $contactsProcessed contacts.")
-        sendCompletionBroadcast(contactsProcessed)
+        val finalMessage = if (contactsSent > 0) {
+            "Completed! Sent to $contactsSent out of $contactsProcessed contacts."
+        } else {
+            "Completed but no messages were sent. Please check Wire app and try again."
+        }
+        
+        updateNotification(finalMessage)
+        sendCompletionBroadcast(contactsSent)
         
         // Show toast
         scope.launch(Dispatchers.Main) {
-            Toast.makeText(this@WireAutomationService, 
-                "Messages sent to $contactsProcessed contacts", 
-                Toast.LENGTH_LONG).show()
+            val toastMessage = if (contactsSent > 0) {
+                "Messages sent to $contactsSent out of $contactsProcessed contacts"
+            } else {
+                "No messages were sent. Please check Wire app."
+            }
+            Toast.makeText(this@WireAutomationService, toastMessage, Toast.LENGTH_LONG).show()
         }
     }
 
@@ -362,33 +485,384 @@ class WireAutomationService : AccessibilityService() {
     private fun getAllContactItems(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
         val contacts = mutableListOf<AccessibilityNodeInfo>()
         
-        // Look for RecyclerView or ListView containing contacts
+        android.util.Log.d("WireAuto", "=== Starting contact detection ===")
+        android.util.Log.d("WireAuto", "Root package: ${root.packageName}, className: ${root.className}")
+        
+        // Method 1: Look for RecyclerView or ListView containing contacts
         val recyclerView = findRecyclerView(root)
         if (recyclerView != null) {
+            android.util.Log.d("WireAuto", "Found RecyclerView with ${recyclerView.childCount} direct children")
+            
+            // Get all children recursively from RecyclerView
             for (i in 0 until recyclerView.childCount) {
                 val child = recyclerView.getChild(i)
-                if (child != null && isContactItem(child)) {
-                    contacts.add(child)
+                if (child != null) {
+                    findContactItemsInNode(child, contacts)
                 }
             }
+            
+            // Also search recursively within RecyclerView
+            findContactItemsRecursive(recyclerView, contacts)
+            
+            android.util.Log.d("WireAuto", "After RecyclerView search: ${contacts.size} contacts found")
         } else {
-            // Fallback: search for all clickable items that might be contacts
-            findContactItemsRecursive(root, contacts)
+            android.util.Log.d("WireAuto", "No RecyclerView found")
         }
         
-        return contacts
+        // Method 2: Search entire root recursively for contact items
+        if (contacts.isEmpty()) {
+            android.util.Log.d("WireAuto", "No contacts in RecyclerView, searching entire root recursively...")
+            findContactItemsRecursive(root, contacts)
+            android.util.Log.d("WireAuto", "After recursive search: ${contacts.size} contacts found")
+        }
+        
+        // Method 3: Broader search - find any clickable items with text (less strict)
+        if (contacts.isEmpty()) {
+            android.util.Log.d("WireAuto", "Trying broader search for clickable items with text...")
+            findClickableItemsWithText(root, contacts)
+            android.util.Log.d("WireAuto", "After broader search: ${contacts.size} contacts found")
+        }
+        
+        // Remove duplicates based on node reference
+        val uniqueContacts = contacts.distinctBy { 
+            // Use a combination of text and position to identify unique contacts
+            "${it.text}_${it.boundsInParent}"
+        }
+        
+        android.util.Log.i("WireAuto", "=== Contact detection complete: ${uniqueContacts.size} unique contacts found ===")
+        if (uniqueContacts.isNotEmpty()) {
+            uniqueContacts.take(5).forEachIndexed { index, contact ->
+                android.util.Log.d("WireAuto", "Contact ${index + 1}: text='${contact.text}', clickable=${contact.isClickable}, className=${contact.className}")
+            }
+        } else {
+            android.util.Log.w("WireAuto", "No contacts found! This might indicate:")
+            android.util.Log.w("WireAuto", "1. Wire UI structure is different than expected")
+            android.util.Log.w("WireAuto", "2. Contacts are in a different screen/view")
+            android.util.Log.w("WireAuto", "3. Wire uses custom views not detected by accessibility")
+        }
+        
+        return uniqueContacts
+    }
+    
+    private fun findContactItemsInNode(node: AccessibilityNodeInfo, contacts: MutableList<AccessibilityNodeInfo>) {
+        if (isContactItem(node)) {
+            contacts.add(node)
+            return
+        }
+        
+        // Check children recursively
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i)
+            if (child != null) {
+                findContactItemsInNode(child, contacts)
+            }
+        }
+    }
+    
+    private fun findClickableItemsWithText(root: AccessibilityNodeInfo, contacts: MutableList<AccessibilityNodeInfo>) {
+        // Find all nodes that are clickable and have text
+        val allNodes = mutableListOf<AccessibilityNodeInfo>()
+        collectAllNodes(root, allNodes)
+        
+        android.util.Log.d("WireAuto", "Collected ${allNodes.size} total nodes for broader search")
+        
+        for (node in allNodes) {
+            if (node.packageName != WIRE_PACKAGE) continue
+            
+            val text = node.text?.toString()?.trim() ?: ""
+            val hasText = text.isNotEmpty() && text.length > 1
+            val isClickable = node.isClickable || findClickableNode(node) != null
+            val className = node.className?.toString() ?: ""
+            
+            // Exclude common UI elements
+            val isExcluded = className.contains("Button", ignoreCase = true) ||
+                            className.contains("EditText", ignoreCase = true) ||
+                            className.contains("ImageButton", ignoreCase = true) ||
+                            className.contains("Toolbar", ignoreCase = true) ||
+                            className.contains("ActionBar", ignoreCase = true) ||
+                            text.lowercase() in listOf("send", "back", "menu", "search", "settings", "ok", "cancel", 
+                                                       "conversations", "contacts", "chats", "messages")
+            
+            if (hasText && isClickable && !isExcluded) {
+                // Additional check: should be meaningful text (not just UI labels)
+                if (text.length > 1 && 
+                    text !in listOf("OK", "Cancel", "Yes", "No", "Close", "Done", "Next", "Previous", "New", "Add")) {
+                    contacts.add(node)
+                    android.util.Log.v("WireAuto", "Found potential contact in broader search: '$text'")
+                }
+            }
+        }
+    }
+    
+    private fun collectAllNodes(node: AccessibilityNodeInfo, allNodes: MutableList<AccessibilityNodeInfo>) {
+        allNodes.add(node)
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i)
+            if (child != null) {
+                collectAllNodes(child, allNodes)
+            }
+        }
     }
 
     private fun findRecyclerView(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        return findNodeByClassName(root, "androidx.recyclerview.widget.RecyclerView")
+        // Try multiple RecyclerView class names
+        val recyclerView = findNodeByClassName(root, "androidx.recyclerview.widget.RecyclerView")
             ?: findNodeByClassName(root, "android.widget.ListView")
+            ?: findNodeByClassName(root, "androidx.recyclerview.widget.RecyclerView")
+            ?: findNodeContaining(root) { node ->
+                val className = node.className?.toString() ?: ""
+                className.contains("RecyclerView", ignoreCase = true) ||
+                className.contains("ListView", ignoreCase = true) ||
+                className.contains("ScrollView", ignoreCase = true)
+            }
+        
+        return recyclerView
+    }
+    
+    private fun findNodeContaining(root: AccessibilityNodeInfo, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
+        if (predicate(root)) {
+            return root
+        }
+        
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i)
+            if (child != null) {
+                val found = findNodeContaining(child, predicate)
+                if (found != null) return found
+            }
+        }
+        
+        return null
+    }
+    
+    private fun logUIStructure(node: AccessibilityNodeInfo, depth: Int, maxDepth: Int) {
+        if (depth > maxDepth) return
+        
+        val indent = "  ".repeat(depth)
+        val text = node.text?.toString()?.take(30) ?: ""
+        val desc = node.contentDescription?.toString()?.take(30) ?: ""
+        val className = node.className?.toString() ?: ""
+        
+        android.util.Log.d("WireAuto", "$indent- $className | text: '$text' | desc: '$desc' | clickable: ${node.isClickable} | children: ${node.childCount}")
+        
+        if (depth < maxDepth) {
+            for (i in 0 until minOf(node.childCount, 10)) { // Limit to first 10 children
+                val child = node.getChild(i)
+                if (child != null) {
+                    logUIStructure(child, depth + 1, maxDepth)
+                }
+            }
+        }
+    }
+    
+    private fun collectDebugInfo(root: AccessibilityNodeInfo): String {
+        val info = StringBuilder()
+        
+        // Count different types of nodes
+        var recyclerViewCount = 0
+        var clickableCount = 0
+        var textNodeCount = 0
+        var wirePackageCount = 0
+        val sampleTexts = mutableListOf<String>()
+        
+        collectNodeStats(root, recyclerViewCount, clickableCount, textNodeCount, wirePackageCount, sampleTexts, 0, 50)
+        
+        // Actually collect stats (the function above won't modify the variables, need to fix)
+        val stats = collectNodeStatsProper(root)
+        
+        info.append("Found ${stats.recyclerViewCount} list views\n")
+        info.append("Found ${stats.clickableCount} clickable items\n")
+        info.append("Found ${stats.textNodeCount} items with text\n")
+        info.append("Found ${stats.wirePackageCount} Wire app elements\n")
+        
+        if (stats.sampleTexts.isNotEmpty()) {
+            info.append("\nSample texts found:\n")
+            stats.sampleTexts.take(5).forEach { text ->
+                info.append("- '$text'\n")
+            }
+        }
+        
+        return info.toString()
+    }
+    
+    private data class NodeStats(
+        var recyclerViewCount: Int = 0,
+        var clickableCount: Int = 0,
+        var textNodeCount: Int = 0,
+        var wirePackageCount: Int = 0,
+        val sampleTexts: MutableList<String> = mutableListOf()
+    )
+    
+    private fun collectNodeStatsProper(node: AccessibilityNodeInfo): NodeStats {
+        val stats = NodeStats()
+        collectNodeStatsRecursive(node, stats, 0, 100) // Limit to 100 nodes for performance
+        return stats
+    }
+    
+    private fun collectNodeStatsRecursive(node: AccessibilityNodeInfo, stats: NodeStats, depth: Int, maxNodes: Int) {
+        if (depth > 5 || stats.wirePackageCount > maxNodes) return // Limit depth and total nodes
+        
+        val className = node.className?.toString() ?: ""
+        val text = node.text?.toString()?.trim() ?: ""
+        
+        if (node.packageName == WIRE_PACKAGE) {
+            stats.wirePackageCount++
+            
+            if (className.contains("RecyclerView", ignoreCase = true) ||
+                className.contains("ListView", ignoreCase = true)) {
+                stats.recyclerViewCount++
+            }
+            
+            if (node.isClickable) {
+                stats.clickableCount++
+            }
+            
+            if (text.isNotEmpty() && text.length > 1) {
+                stats.textNodeCount++
+                if (stats.sampleTexts.size < 10) {
+                    stats.sampleTexts.add(text.take(30))
+                }
+            }
+        }
+        
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i)
+            if (child != null) {
+                collectNodeStatsRecursive(child, stats, depth + 1, maxNodes)
+            }
+        }
+    }
+    
+    private fun collectNodeStats(
+        node: AccessibilityNodeInfo, 
+        recyclerViewCount: Int, 
+        clickableCount: Int, 
+        textNodeCount: Int, 
+        wirePackageCount: Int, 
+        sampleTexts: MutableList<String>, 
+        depth: Int, 
+        maxDepth: Int
+    ) {
+        // This is a placeholder - the actual implementation uses collectNodeStatsProper
     }
 
     private fun isContactItem(node: AccessibilityNodeInfo): Boolean {
-        // A contact item typically has text (name) and is clickable
-        return node.isClickable && 
-               (node.text != null && node.text.isNotEmpty() ||
-                node.contentDescription != null && node.contentDescription.isNotEmpty())
+        // A contact/conversation item in Wire typically:
+        // - Has text (contact name or last message)
+        // - Is clickable or has clickable parent
+        // - Is not a button or input field
+        // - Is not empty
+        // - Is in Wire package
+        
+        // Must be in Wire package
+        if (node.packageName != WIRE_PACKAGE) {
+            return false
+        }
+        
+        val text = node.text?.toString()?.trim() ?: ""
+        val description = node.contentDescription?.toString()?.trim() ?: ""
+        val hasText = text.isNotEmpty()
+        val hasDescription = description.isNotEmpty()
+        
+        // Must have some text content
+        if (!hasText && !hasDescription) {
+            return false
+        }
+        
+        // Exclude buttons, input fields, and other UI elements
+        val className = node.className?.toString() ?: ""
+        val isUIElement = className.contains("Button", ignoreCase = true) ||
+                         className.contains("EditText", ignoreCase = true) ||
+                         className.contains("ImageButton", ignoreCase = true) ||
+                         className.contains("Toolbar", ignoreCase = true) ||
+                         className.contains("ActionBar", ignoreCase = true) ||
+                         className.contains("TextView", ignoreCase = true) && text.length < 3 // Very short text in TextView is likely UI
+        
+        if (isUIElement) {
+            return false
+        }
+        
+        // Exclude common UI text (but be less strict)
+        val lowerText = text.lowercase()
+        val isCommonUIText = lowerText in listOf("send", "back", "menu", "search", "settings", "ok", "cancel", 
+                                                  "yes", "no", "close", "done", "next", "previous", "new", "add")
+        
+        // Allow "conversations", "contacts", "chats", "messages" as they might be section headers
+        // But exclude them if they're buttons
+        if (isCommonUIText && className.contains("Button", ignoreCase = true)) {
+            return false
+        }
+        
+        // Must be clickable or have clickable parent/child
+        val isClickable = node.isClickable || 
+                         findClickableNode(node) != null ||
+                         hasClickableChild(node)
+        
+        // If not directly clickable, check if parent is clickable (common in list items)
+        if (!isClickable) {
+            var parent = node.parent
+            var depth = 0
+            while (parent != null && depth < 5) {
+                if (parent.isClickable) {
+                    // Parent is clickable, this might be a contact item
+                    break
+                }
+                parent = parent.parent
+                depth++
+            }
+            if (parent == null || !parent.isClickable) {
+                return false
+            }
+        }
+        
+        // Text should be at least 1 character (be more lenient)
+        if (hasText && text.length < 1) {
+            return false
+        }
+        
+        // Additional check: if it's in a RecyclerView or ListView, it's more likely a contact
+        val isInList = isInListView(node)
+        
+        // If in a list and has text, it's very likely a contact
+        if (isInList && hasText && text.length >= 2) {
+            android.util.Log.v("WireAuto", "✓ Contact found (in list): text='$text', className=$className")
+            return true
+        }
+        
+        // Even if not in list, if it has meaningful text and is clickable, consider it
+        if (hasText && text.length >= 2 && isClickable) {
+            android.util.Log.v("WireAuto", "✓ Contact found (clickable with text): text='$text', className=$className")
+            return true
+        }
+        
+        android.util.Log.v("WireAuto", "✗ Not a contact: text='$text', clickable=$isClickable, inList=$isInList, className=$className")
+        return false
+    }
+    
+    private fun hasClickableChild(node: AccessibilityNodeInfo): Boolean {
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i)
+            if (child != null && child.isClickable) {
+                return true
+            }
+        }
+        return false
+    }
+    
+    private fun isInListView(node: AccessibilityNodeInfo): Boolean {
+        var parent = node.parent
+        var depth = 0
+        while (parent != null && depth < 10) {
+            val className = parent.className?.toString() ?: ""
+            if (className.contains("RecyclerView", ignoreCase = true) ||
+                className.contains("ListView", ignoreCase = true) ||
+                className.contains("ScrollView", ignoreCase = true)) {
+                return true
+            }
+            parent = parent.parent
+            depth++
+        }
+        return false
     }
 
     private fun findContactItemsRecursive(node: AccessibilityNodeInfo, contacts: MutableList<AccessibilityNodeInfo>) {
