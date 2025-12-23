@@ -5,32 +5,34 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
-import android.text.TextUtils
+import android.view.View
 import android.view.accessibility.AccessibilityManager
-import android.widget.Button
-import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.ProgressBar
-import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.switchmaterial.SwitchMaterial
+import com.google.android.material.textfield.TextInputEditText
 import com.wireautomessenger.service.WireAutomationService
 import com.wireautomessenger.work.MessageSendingWorker
 import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var etMessage: EditText
-    private lateinit var btnSendNow: Button
-    private lateinit var btnEnableAccessibility: Button
-    private lateinit var switchSchedule: Switch
+    private lateinit var etMessage: TextInputEditText
+    private lateinit var btnSendNow: MaterialButton
+    private lateinit var btnEnableAccessibility: MaterialButton
+    private lateinit var switchSchedule: SwitchMaterial
     private lateinit var tvAccessibilityStatus: TextView
     private lateinit var tvStatus: TextView
     private lateinit var tvNextSend: TextView
     private lateinit var progressBar: ProgressBar
+    private lateinit var llProgress: LinearLayout
 
     private val prefs by lazy {
         getSharedPreferences("WireAutoMessenger", Context.MODE_PRIVATE)
@@ -56,6 +58,7 @@ class MainActivity : AppCompatActivity() {
         tvStatus = findViewById(R.id.tvStatus)
         tvNextSend = findViewById(R.id.tvNextSend)
         progressBar = findViewById(R.id.progressBar)
+        llProgress = findViewById(R.id.llProgress)
     }
 
     private fun checkAccessibilityService() {
@@ -72,12 +75,14 @@ class MainActivity : AppCompatActivity() {
     private fun updateAccessibilityStatus(isEnabled: Boolean) {
         if (isEnabled) {
             tvAccessibilityStatus.text = "✓ Enabled"
-            tvAccessibilityStatus.setTextColor(getColor(android.R.color.holo_green_dark))
-            btnEnableAccessibility.text = "Accessibility Service Enabled"
+            tvAccessibilityStatus.setTextColor(getColor(R.color.on_success))
+            tvAccessibilityStatus.setBackgroundResource(R.drawable.status_badge_success)
+            btnEnableAccessibility.text = "Service Enabled"
             btnEnableAccessibility.isEnabled = false
         } else {
             tvAccessibilityStatus.text = "✗ Not Enabled"
-            tvAccessibilityStatus.setTextColor(getColor(android.R.color.holo_red_dark))
+            tvAccessibilityStatus.setTextColor(getColor(R.color.on_error))
+            tvAccessibilityStatus.setBackgroundResource(R.drawable.status_badge_error)
             btnEnableAccessibility.text = "Enable Accessibility Service"
             btnEnableAccessibility.isEnabled = true
         }
@@ -91,7 +96,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun saveMessage() {
-        val message = etMessage.text.toString()
+        val message = etMessage.text?.toString() ?: ""
         prefs.edit().putString("saved_message", message).apply()
     }
 
@@ -125,9 +130,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val message = etMessage.text.toString().trim()
+        val message = etMessage.text?.toString()?.trim() ?: ""
         if (message.isEmpty()) {
             etMessage.error = getString(R.string.message_empty)
+            Toast.makeText(this, getString(R.string.message_empty), Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -148,14 +154,16 @@ class MainActivity : AppCompatActivity() {
             startService(intent)
         }
 
-        progressBar.visibility = android.view.View.VISIBLE
+        llProgress.visibility = View.VISIBLE
         tvStatus.text = getString(R.string.sending_messages)
+        tvStatus.visibility = View.VISIBLE
         btnSendNow.isEnabled = false
+        switchSchedule.isEnabled = false
     }
 
     private fun handleScheduleToggle(isChecked: Boolean) {
         if (isChecked) {
-            val message = etMessage.text.toString().trim()
+            val message = etMessage.text?.toString()?.trim() ?: ""
             if (message.isEmpty()) {
                 switchSchedule.isChecked = false
                 etMessage.error = getString(R.string.message_empty)
@@ -188,6 +196,7 @@ class MainActivity : AppCompatActivity() {
             workRequest
         )
 
+        prefs.edit().putLong("schedule_start_time", System.currentTimeMillis()).apply()
         prefs.edit().putBoolean("schedule_enabled", true).apply()
         updateScheduleStatus()
         Toast.makeText(this, getString(R.string.schedule_enabled), Toast.LENGTH_SHORT).show()
@@ -205,15 +214,20 @@ class MainActivity : AppCompatActivity() {
         switchSchedule.isChecked = isEnabled
         
         if (isEnabled) {
-            // Calculate next send time (3 days from last send or now)
-            val lastSendTime = prefs.getLong("last_send_time", System.currentTimeMillis())
-            val nextSendTime = lastSendTime + (3 * 24 * 60 * 60 * 1000L)
-            val nextSendDate = java.text.SimpleDateFormat("MMM dd, yyyy HH:mm", java.util.Locale.getDefault())
+            // Calculate next send time (3 days from schedule start or last send)
+            val scheduleStartTime = prefs.getLong("schedule_start_time", System.currentTimeMillis())
+            val lastSendTime = prefs.getLong("last_send_time", scheduleStartTime)
+            val nextSendTime = if (lastSendTime > scheduleStartTime) {
+                lastSendTime + (3 * 24 * 60 * 60 * 1000L)
+            } else {
+                scheduleStartTime + (3 * 24 * 60 * 60 * 1000L)
+            }
+            val nextSendDate = java.text.SimpleDateFormat("MMM dd, yyyy 'at' HH:mm", java.util.Locale.getDefault())
                 .format(java.util.Date(nextSendTime))
-            tvNextSend.text = getString(R.string.next_send_time, nextSendDate)
-            tvNextSend.visibility = android.view.View.VISIBLE
+            tvNextSend.text = "Next send: $nextSendDate"
+            tvNextSend.visibility = View.VISIBLE
         } else {
-            tvNextSend.visibility = android.view.View.GONE
+            tvNextSend.visibility = View.GONE
         }
     }
 
@@ -230,6 +244,16 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         checkAccessibilityService()
         updateScheduleStatus()
+        
+        // Check if sending completed
+        val sendingComplete = prefs.getBoolean("sending_complete", false)
+        if (sendingComplete) {
+            llProgress.visibility = View.GONE
+            tvStatus.text = getString(R.string.messages_sent)
+            tvStatus.visibility = View.VISIBLE
+            btnSendNow.isEnabled = true
+            switchSchedule.isEnabled = true
+            prefs.edit().putBoolean("sending_complete", false).apply()
+        }
     }
 }
-

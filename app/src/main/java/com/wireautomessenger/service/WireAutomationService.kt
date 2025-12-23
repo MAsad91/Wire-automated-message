@@ -179,8 +179,11 @@ class WireAutomationService : AccessibilityService() {
             }
         }
 
-        // Save last send time
-        prefs.edit().putLong("last_send_time", System.currentTimeMillis()).apply()
+        // Save last send time and completion status
+        prefs.edit()
+            .putLong("last_send_time", System.currentTimeMillis())
+            .putBoolean("sending_complete", true)
+            .apply()
         
         updateNotification("Completed! Sent to $contactsProcessed contacts.")
         

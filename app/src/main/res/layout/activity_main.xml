@@ -1,170 +1,296 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.coordinatorlayout.widget.CoordinatorLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:padding="16dp"
+    android:background="@color/background"
     tools:context=".MainActivity">
 
-    <ScrollView
+    <com.google.android.material.appbar.AppBarLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:theme="@style/ThemeOverlay.Material3.Dark.ActionBar"
+        app:elevation="0dp">
+
+        <com.google.android.material.appbar.MaterialToolbar
+            android:id="@+id/toolbar"
+            android:layout_width="match_parent"
+            android:layout_height="?attr/actionBarSize"
+            android:background="@color/primary"
+            app:title="Wire Auto Messenger"
+            app:titleTextColor="@color/on_primary"
+            app:navigationIconTint="@color/on_primary" />
+
+    </com.google.android.material.appbar.AppBarLayout>
+
+    <androidx.core.widget.NestedScrollView
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintBottom_toBottomOf="parent">
+        app:layout_behavior="@string/appbar_scrolling_view_behavior"
+        android:fillViewport="true">
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical">
+            android:orientation="vertical"
+            android:padding="20dp">
 
-            <!-- Header -->
-            <TextView
+            <!-- Welcome Card -->
+            <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Wire Auto Messenger"
-                android:textSize="24sp"
-                android:textStyle="bold"
-                android:gravity="center"
-                android:layout_marginBottom="8dp"
-                android:textColor="@color/purple_700" />
-
-            <!-- Accessibility Service Status -->
-            <androidx.cardview.widget.CardView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="16dp"
-                app:cardCornerRadius="8dp"
-                app:cardElevation="4dp">
+                android:layout_marginBottom="20dp"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="2dp"
+                app:strokeWidth="0dp"
+                app:cardBackgroundColor="@color/primary_container">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
-                    android:padding="16dp">
+                    android:padding="20dp">
 
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Accessibility Service Status"
-                        android:textSize="16sp"
+                        android:text="Welcome!"
+                        android:textSize="24sp"
                         android:textStyle="bold"
+                        android:textColor="@color/on_primary_container"
                         android:layout_marginBottom="8dp" />
 
                     <TextView
-                        android:id="@+id/tvAccessibilityStatus"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Checking..."
+                        android:text="Send messages to all your Wire contacts automatically. Set it up once and let it work for you."
                         android:textSize="14sp"
-                        android:layout_marginBottom="8dp" />
+                        android:textColor="@color/on_primary_container"
+                        android:alpha="0.87" />
 
-                    <Button
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <!-- Accessibility Service Status Card -->
+            <com.google.android.material.card.MaterialCardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="16dp"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="2dp"
+                app:strokeWidth="0dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="20dp">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:layout_marginBottom="12dp">
+
+                        <TextView
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="Service Status"
+                            android:textSize="18sp"
+                            android:textStyle="bold"
+                            android:textColor="@color/on_surface" />
+
+                        <TextView
+                            android:id="@+id/tvAccessibilityStatus"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Checking..."
+                            android:textSize="14sp"
+                            android:textStyle="bold"
+                            android:paddingHorizontal="12dp"
+                            android:paddingVertical="6dp"
+                            android:background="@drawable/status_badge"
+                            android:textColor="@color/on_surface" />
+
+                    </LinearLayout>
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Enable Accessibility Service to allow the app to automate message sending in Wire."
+                        android:textSize="13sp"
+                        android:textColor="@color/on_surface_variant"
+                        android:layout_marginBottom="16dp" />
+
+                    <com.google.android.material.button.MaterialButton
                         android:id="@+id/btnEnableAccessibility"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:text="@string/enable_accessibility"
-                        android:textAllCaps="false" />
+                        android:textAllCaps="false"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        app:icon="@android:drawable/ic_menu_preferences"
+                        app:iconGravity="textStart" />
 
                 </LinearLayout>
-            </androidx.cardview.widget.CardView>
+            </com.google.android.material.card.MaterialCardView>
 
-            <!-- Message Input -->
-            <androidx.cardview.widget.CardView
+            <!-- Message Input Card -->
+            <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="16dp"
-                app:cardCornerRadius="8dp"
-                app:cardElevation="4dp">
+                app:cardCornerRadius="16dp"
+                app:cardElevation="2dp"
+                app:strokeWidth="0dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
-                    android:padding="16dp">
+                    android:padding="20dp">
 
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Message"
-                        android:textSize="16sp"
+                        android:text="Your Message"
+                        android:textSize="18sp"
                         android:textStyle="bold"
-                        android:layout_marginBottom="8dp" />
+                        android:textColor="@color/on_surface"
+                        android:layout_marginBottom="12dp" />
 
-                    <EditText
-                        android:id="@+id/etMessage"
+                    <com.google.android.material.textfield.TextInputLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:minHeight="120dp"
-                        android:gravity="top|start"
                         android:hint="@string/message_hint"
-                        android:inputType="textMultiLine"
-                        android:padding="12dp"
-                        android:background="@android:drawable/edit_text"
-                        android:layout_marginBottom="8dp" />
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        app:boxCornerRadiusTopStart="12dp"
+                        app:boxCornerRadiusTopEnd="12dp"
+                        app:boxCornerRadiusBottomStart="12dp"
+                        app:boxCornerRadiusBottomEnd="12dp"
+                        app:startIconDrawable="@android:drawable/ic_menu_edit"
+                        android:layout_marginBottom="8dp">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/etMessage"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:minLines="4"
+                            android:maxLines="8"
+                            android:inputType="textMultiLine|textCapSentences"
+                            android:textSize="15sp" />
+
+                    </com.google.android.material.textfield.TextInputLayout>
 
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="This message will be sent to all your Wire contacts."
+                        android:text="This message will be sent to all your Wire contacts (500+ supported)."
                         android:textSize="12sp"
-                        android:textColor="@android:color/darker_gray" />
+                        android:textColor="@color/on_surface_variant"
+                        android:drawablePadding="8dp"
+                        android:drawableStart="@android:drawable/ic_dialog_info"
+                        android:paddingStart="4dp" />
 
                 </LinearLayout>
-            </androidx.cardview.widget.CardView>
+            </com.google.android.material.card.MaterialCardView>
 
-            <!-- Schedule Section -->
-            <androidx.cardview.widget.CardView
+            <!-- Schedule Card -->
+            <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="16dp"
-                app:cardCornerRadius="8dp"
-                app:cardElevation="4dp">
+                android:layout_marginBottom="20dp"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="2dp"
+                app:strokeWidth="0dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
-                    android:padding="16dp">
+                    android:padding="20dp">
 
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="@string/schedule_label"
-                        android:textSize="16sp"
+                        android:text="Automatic Scheduling"
+                        android:textSize="18sp"
                         android:textStyle="bold"
-                        android:layout_marginBottom="8dp" />
+                        android:textColor="@color/on_surface"
+                        android:layout_marginBottom="12dp" />
 
-                    <Switch
-                        android:id="@+id/switchSchedule"
+                    <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="@string/schedule_every_3_days"
-                        android:layout_marginBottom="8dp" />
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:layout_marginBottom="8dp">
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="@string/schedule_every_3_days"
+                                android:textSize="16sp"
+                                android:textColor="@color/on_surface" />
+
+                            <TextView
+                                android:id="@+id/tvNextSend"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text=""
+                                android:textSize="13sp"
+                                android:textColor="@color/on_surface_variant"
+                                android:visibility="gone"
+                                android:layout_marginTop="4dp" />
+
+                        </LinearLayout>
+
+                        <com.google.android.material.switchmaterial.SwitchMaterial
+                            android:id="@+id/switchSchedule"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            app:thumbTint="@color/primary"
+                            app:trackTint="@color/surface_variant" />
+
+                    </LinearLayout>
 
                     <TextView
-                        android:id="@+id/tvNextSend"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text=""
-                        android:textSize="14sp"
-                        android:textColor="@android:color/darker_gray"
-                        android:visibility="gone" />
+                        android:text="Automatically send your message every 3 days without manual intervention."
+                        android:textSize="12sp"
+                        android:textColor="@color/on_surface_variant"
+                        android:drawablePadding="8dp"
+                        android:drawableStart="@android:drawable/ic_menu_recent_history"
+                        android:paddingStart="4dp" />
 
                 </LinearLayout>
-            </androidx.cardview.widget.CardView>
+            </com.google.android.material.card.MaterialCardView>
 
-            <!-- Action Buttons -->
-            <Button
+            <!-- Action Button -->
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnSendNow"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="@string/send_now"
                 android:textAllCaps="false"
-                android:layout_marginBottom="8dp"
-                android:padding="16dp"
-                style="@style/Widget.MaterialComponents.Button" />
+                android:textSize="16sp"
+                android:paddingVertical="16dp"
+                style="@style/Widget.Material3.Button"
+                app:icon="@android:drawable/ic_menu_send"
+                app:iconGravity="textStart"
+                android:layout_marginBottom="12dp" />
 
+            <!-- Status Text -->
             <TextView
                 android:id="@+id/tvStatus"
                 android:layout_width="match_parent"
@@ -172,19 +298,38 @@
                 android:text=""
                 android:textSize="14sp"
                 android:gravity="center"
-                android:layout_marginTop="8dp"
-                android:padding="8dp" />
+                android:textColor="@color/on_surface_variant"
+                android:paddingVertical="8dp"
+                android:visibility="gone" />
 
-            <ProgressBar
-                android:id="@+id/progressBar"
-                android:layout_width="wrap_content"
+            <!-- Progress Indicator -->
+            <LinearLayout
+                android:id="@+id/llProgress"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_gravity="center"
+                android:orientation="vertical"
+                android:gravity="center"
                 android:visibility="gone"
-                android:layout_marginTop="16dp" />
+                android:layout_marginTop="8dp">
+
+                <com.google.android.material.progressindicator.CircularProgressIndicator
+                    android:id="@+id/progressBar"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:indeterminate="true"
+                    app:indicatorColor="@color/primary" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Sending messages..."
+                    android:textSize="14sp"
+                    android:textColor="@color/on_surface_variant"
+                    android:layout_marginTop="12dp" />
+
+            </LinearLayout>
 
         </LinearLayout>
-    </ScrollView>
+    </androidx.core.widget.NestedScrollView>
 
-</androidx.constraintlayout.widget.ConstraintLayout>
-
+</androidx.coordinatorlayout.widget.CoordinatorLayout>
