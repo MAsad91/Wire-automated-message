@@ -260,7 +260,14 @@ class WireAutomationService : AccessibilityService() {
             // Try scrolling to load more contacts
             android.util.Log.d("WireAuto", "No contacts found, trying to scroll...")
             try {
-                performGlobalAction(AccessibilityService.GLOBAL_ACTION_SCROLL_DOWN)
+                // Find scrollable view and scroll down
+                val scrollableView = findScrollableView(rootNode)
+                if (scrollableView != null) {
+                    scrollableView.performAction(AccessibilityNodeInfo.ACTION_SCROLL_DOWN)
+                    android.util.Log.d("WireAuto", "Scrolled down in scrollable view")
+                } else {
+                    android.util.Log.w("WireAuto", "No scrollable view found for scrolling")
+                }
                 delay(2000)
                 rootNode = rootInActiveWindow
                 if (rootNode != null && rootNode.packageName == WIRE_PACKAGE) {
@@ -526,7 +533,9 @@ class WireAutomationService : AccessibilityService() {
         // Remove duplicates based on node reference
         val uniqueContacts = contacts.distinctBy { 
             // Use a combination of text and position to identify unique contacts
-            "${it.text}_${it.boundsInScreen}"
+            val bounds = android.graphics.Rect()
+            it.getBoundsInScreen(bounds)
+            "${it.text}_${bounds.left}_${bounds.top}_${bounds.right}_${bounds.bottom}"
         }
         
         android.util.Log.i("WireAuto", "=== Contact detection complete: ${uniqueContacts.size} unique contacts found ===")
@@ -897,6 +906,31 @@ class WireAutomationService : AccessibilityService() {
         // If not found, try to find bottom navigation or tab bar
         // Wire typically shows conversations by default, so this might not be needed
         android.util.Log.d("WireAuto", "Conversations button not found, assuming already on conversations screen")
+    }
+    
+    private fun findScrollableView(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        // Look for RecyclerView, ListView, or ScrollView
+        val className = root.className?.toString() ?: ""
+        if (className.contains("RecyclerView", ignoreCase = true) ||
+            className.contains("ListView", ignoreCase = true) ||
+            className.contains("ScrollView", ignoreCase = true)) {
+            if (root.isScrollable) {
+                return root
+            }
+        }
+        
+        // Check children recursively
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i)
+            if (child != null) {
+                val scrollable = findScrollableView(child)
+                if (scrollable != null) {
+                    return scrollable
+                }
+            }
+        }
+        
+        return null
     }
     
     private fun isInListView(node: AccessibilityNodeInfo): Boolean {
