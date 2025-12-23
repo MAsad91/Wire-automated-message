@@ -101,9 +101,15 @@ class MainActivity : AppCompatActivity() {
     private fun showAccessibilityPermissionDialog() {
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.permission_dialog_title)
-            .setMessage(R.string.permission_dialog_message)
+            .setMessage(getString(R.string.permission_dialog_message) + "\n\n" +
+                    "Steps:\n" +
+                    "1. Tap 'Enable Now' below\n" +
+                    "2. Find 'Wire Auto Messenger' in the list\n" +
+                    "3. Toggle the switch ON\n" +
+                    "4. Tap 'Allow' on the warning dialog\n" +
+                    "5. Return to this app")
             .setPositiveButton(R.string.permission_dialog_positive) { _, _ ->
-                openAccessibilitySettings()
+                openAccessibilityServiceSettings()
             }
             .setNegativeButton(R.string.permission_dialog_negative, null)
             .setCancelable(false)
@@ -184,7 +190,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupListeners() {
         btnEnableAccessibility.setOnClickListener {
-            openAccessibilitySettings()
+            if (!isAccessibilityServiceEnabled()) {
+                showAccessibilityPermissionDialog()
+            }
         }
 
         btnSendNow.setOnClickListener {
@@ -203,6 +211,28 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Please enable 'Wire Auto Messenger' in the accessibility settings", Toast.LENGTH_LONG).show()
         } catch (e: Exception) {
             Toast.makeText(this, "Could not open accessibility settings", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun openAccessibilityServiceSettings() {
+        try {
+            // Try to open directly to our service settings
+            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+            
+            // Show helpful toast
+            Toast.makeText(this, 
+                "Look for 'Wire Auto Messenger' in the list and toggle it ON", 
+                Toast.LENGTH_LONG).show()
+        } catch (e: Exception) {
+            // Fallback to general accessibility settings
+            try {
+                val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                startActivity(intent)
+            } catch (e2: Exception) {
+                Toast.makeText(this, "Could not open accessibility settings", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 

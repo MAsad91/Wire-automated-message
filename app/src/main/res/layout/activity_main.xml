@@ -171,7 +171,6 @@
                         app:boxCornerRadiusTopEnd="12dp"
                         app:boxCornerRadiusBottomStart="12dp"
                         app:boxCornerRadiusBottomEnd="12dp"
-                        app:startIconDrawable="@android:drawable/ic_menu_edit"
                         android:layout_marginBottom="8dp">
 
                         <com.google.android.material.textfield.TextInputEditText
@@ -189,17 +188,31 @@
 
                     </com.google.android.material.textfield.TextInputLayout>
 
-                    <TextView
+                    <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="This message will be sent to all your Wire contacts."
-                        android:textSize="12sp"
-                        android:textColor="@color/on_surface_variant"
-                        android:drawablePadding="8dp"
-                        android:drawableStart="@android:drawable/ic_dialog_info"
-                        android:drawableTint="@color/on_surface_variant"
-                        android:paddingStart="4dp"
-                        android:paddingTop="4dp" />
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:paddingTop="4dp">
+
+                        <ImageView
+                            android:layout_width="16dp"
+                            android:layout_height="16dp"
+                            android:src="@android:drawable/ic_dialog_info"
+                            android:tint="@color/on_surface_variant"
+                            android:contentDescription="Info"
+                            android:layout_marginEnd="8dp" />
+
+                        <TextView
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="This message will be sent to all your Wire contacts."
+                            android:textSize="12sp"
+                            android:textColor="@color/on_surface_variant"
+                            android:gravity="center_vertical" />
+
+                    </LinearLayout>
 
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
@@ -269,15 +282,30 @@
 
                     </LinearLayout>
 
-                    <TextView
+                    <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Automatically send your message every 3 days without manual intervention."
-                        android:textSize="12sp"
-                        android:textColor="@color/on_surface_variant"
-                        android:drawablePadding="8dp"
-                        android:drawableStart="@android:drawable/ic_menu_recent_history"
-                        android:paddingStart="4dp" />
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <ImageView
+                            android:layout_width="16dp"
+                            android:layout_height="16dp"
+                            android:src="@android:drawable/ic_menu_recent_history"
+                            android:tint="@color/on_surface_variant"
+                            android:contentDescription="Schedule"
+                            android:layout_marginEnd="8dp" />
+
+                        <TextView
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="Automatically send your message every 3 days without manual intervention."
+                            android:textSize="12sp"
+                            android:textColor="@color/on_surface_variant"
+                            android:gravity="center_vertical" />
+
+                    </LinearLayout>
 
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
@@ -339,3 +367,5 @@
     </androidx.core.widget.NestedScrollView>
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
+
+
