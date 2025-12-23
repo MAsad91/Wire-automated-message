@@ -1,8 +1,10 @@
 package com.wireautomessenger
 
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -17,6 +19,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
@@ -43,6 +46,26 @@ class MainActivity : AppCompatActivity() {
     private val prefs by lazy {
         getSharedPreferences("WireAutoMessenger", Context.MODE_PRIVATE)
     }
+    
+    private val messageBroadcastReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                WireAutomationService.ACTION_PROGRESS_UPDATE -> {
+                    val progressText = intent.getStringExtra(WireAutomationService.EXTRA_PROGRESS_TEXT) ?: ""
+                    val contactsSent = intent.getIntExtra(WireAutomationService.EXTRA_CONTACTS_SENT, 0)
+                    updateProgress(progressText, contactsSent)
+                }
+                WireAutomationService.ACTION_COMPLETED -> {
+                    val contactsSent = intent.getIntExtra(WireAutomationService.EXTRA_CONTACTS_SENT, 0)
+                    onSendingCompleted(contactsSent)
+                }
+                WireAutomationService.ACTION_ERROR -> {
+                    val errorMessage = intent.getStringExtra(WireAutomationService.EXTRA_ERROR_MESSAGE) ?: "Unknown error"
+                    onSendingError(errorMessage)
+                }
+            }
+        }
+    }
 
     companion object {
         private const val PERMISSION_REQUEST_CODE = 100
@@ -59,6 +82,50 @@ class MainActivity : AppCompatActivity() {
         loadSavedMessage()
         setupListeners()
         updateScheduleStatus()
+        registerBroadcastReceiver()
+    }
+    
+    override fun onResume() {
+        super.onResume()
+        checkAccessibilityService()
+        // Check if sending was completed while app was in background
+        val sendingComplete = prefs.getBoolean("sending_complete", false)
+        if (sendingComplete && llProgress.visibility == View.VISIBLE) {
+            // If progress is showing but sending is complete, reset UI
+            val contactsSent = prefs.getInt("last_contacts_sent", 0)
+            if (contactsSent > 0) {
+                onSendingCompleted(contactsSent)
+            } else {
+                resetSendingUI()
+            }
+        }
+    }
+    
+    override fun onPause() {
+        super.onPause()
+        // Don't unregister here, keep listening in background
+    }
+    
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterBroadcastReceiver()
+    }
+    
+    private fun registerBroadcastReceiver() {
+        val filter = IntentFilter().apply {
+            addAction(WireAutomationService.ACTION_PROGRESS_UPDATE)
+            addAction(WireAutomationService.ACTION_COMPLETED)
+            addAction(WireAutomationService.ACTION_ERROR)
+        }
+        LocalBroadcastManager.getInstance(this).registerReceiver(messageBroadcastReceiver, filter)
+    }
+    
+    private fun unregisterBroadcastReceiver() {
+        try {
+            LocalBroadcastManager.getInstance(this).unregisterReceiver(messageBroadcastReceiver)
+        } catch (e: Exception) {
+            // Receiver might not be registered
+        }
     }
 
     private fun requestPermissions() {
@@ -333,6 +400,9 @@ class MainActivity : AppCompatActivity() {
         // Save message for the service to use
         prefs.edit().putString("pending_message", message).apply()
         
+        // Reset completion flag
+        prefs.edit().putBoolean("sending_complete", false).putInt("last_contacts_sent", 0).apply()
+        
         // Start the automation service
         val intent = Intent(this, WireAutomationService::class.java)
         intent.action = WireAutomationService.ACTION_SEND_MESSAGES
@@ -343,10 +413,71 @@ class MainActivity : AppCompatActivity() {
         }
 
         llProgress.visibility = View.VISIBLE
+        progressBar.visibility = View.VISIBLE
         tvStatus.text = getString(R.string.sending_messages)
         tvStatus.visibility = View.VISIBLE
         btnSendNow.isEnabled = false
         switchSchedule.isEnabled = false
+    }
+    
+    private fun updateProgress(progressText: String, contactsSent: Int) {
+        runOnUiThread {
+            tvStatus.text = progressText
+            if (contactsSent > 0) {
+                tvStatus.text = "$progressText ($contactsSent sent)"
+            }
+        }
+    }
+    
+    private fun onSendingCompleted(contactsSent: Int) {
+        runOnUiThread {
+            // Save completion status
+            prefs.edit()
+                .putBoolean("sending_complete", true)
+                .putInt("last_contacts_sent", contactsSent)
+                .apply()
+            
+            // Update UI
+            progressBar.visibility = View.GONE
+            tvStatus.text = "✓ Completed! Sent to $contactsSent contacts"
+            tvStatus.setTextColor(getColor(R.color.on_success))
+            
+            // Show success message
+            Toast.makeText(this, "Messages sent to $contactsSent contacts successfully!", Toast.LENGTH_LONG).show()
+            
+            // Reset UI after 3 seconds
+            btnSendNow.postDelayed({
+                resetSendingUI()
+            }, 3000)
+        }
+    }
+    
+    private fun onSendingError(errorMessage: String) {
+        runOnUiThread {
+            // Update UI
+            progressBar.visibility = View.GONE
+            tvStatus.text = "✗ Error: $errorMessage"
+            tvStatus.setTextColor(getColor(R.color.on_error))
+            
+            // Show error message
+            Toast.makeText(this, "Error: $errorMessage", Toast.LENGTH_LONG).show()
+            
+            // Reset UI after 3 seconds
+            btnSendNow.postDelayed({
+                resetSendingUI()
+            }, 3000)
+        }
+    }
+    
+    private fun resetSendingUI() {
+        runOnUiThread {
+            llProgress.visibility = View.GONE
+            progressBar.visibility = View.GONE
+            tvStatus.visibility = View.GONE
+            btnSendNow.isEnabled = true
+            switchSchedule.isEnabled = true
+            tvStatus.setTextColor(getColor(R.color.on_surface))
+        }
     }
 
     private fun handleScheduleToggle(isChecked: Boolean) {

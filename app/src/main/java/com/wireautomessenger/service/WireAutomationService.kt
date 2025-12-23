@@ -9,6 +9,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.wireautomessenger.MainActivity
 import com.wireautomessenger.R
 import kotlinx.coroutines.CoroutineScope
@@ -31,6 +32,16 @@ class WireAutomationService : AccessibilityService() {
         const val WIRE_PACKAGE = "ch.wire"
         const val NOTIFICATION_ID = 1001
         const val CHANNEL_ID = "wire_automation_channel"
+        
+        // Broadcast actions
+        const val ACTION_PROGRESS_UPDATE = "com.wireautomessenger.PROGRESS_UPDATE"
+        const val ACTION_COMPLETED = "com.wireautomessenger.COMPLETED"
+        const val ACTION_ERROR = "com.wireautomessenger.ERROR"
+        
+        // Broadcast extras
+        const val EXTRA_PROGRESS_TEXT = "progress_text"
+        const val EXTRA_CONTACTS_SENT = "contacts_sent"
+        const val EXTRA_ERROR_MESSAGE = "error_message"
     }
 
     override fun onServiceConnected() {
@@ -95,11 +106,13 @@ class WireAutomationService : AccessibilityService() {
             val message = prefs.getString("pending_message", "") ?: ""
             if (message.isEmpty()) {
                 updateNotification("No message to send")
+                sendErrorBroadcast("No message to send. Please enter a message first.")
                 isRunning.set(false)
                 return
             }
 
             updateNotification("Opening Wire app...")
+            sendProgressBroadcast("Opening Wire app...")
             
             // Launch Wire app
             val wireIntent = packageManager.getLaunchIntentForPackage(WIRE_PACKAGE)
@@ -109,6 +122,7 @@ class WireAutomationService : AccessibilityService() {
                 delay(3000) // Wait for app to open
             } else {
                 updateNotification("Wire app not found")
+                sendErrorBroadcast("Wire app not found. Please install Wire app first.")
                 isRunning.set(false)
                 return
             }
@@ -117,7 +131,9 @@ class WireAutomationService : AccessibilityService() {
             navigateAndSendMessages(message)
 
         } catch (e: Exception) {
-            updateNotification("Error: ${e.message}")
+            val errorMsg = "Error: ${e.message ?: "Unknown error"}"
+            updateNotification(errorMsg)
+            sendErrorBroadcast(errorMsg)
             e.printStackTrace()
         } finally {
             isRunning.set(false)
@@ -132,11 +148,16 @@ class WireAutomationService : AccessibilityService() {
         val maxContacts = 500 // Safety limit
         
         updateNotification("Navigating to contacts...")
+        sendProgressBroadcast("Navigating to contacts...")
         delay(2000)
 
         // Try to find and click on contacts/conversations tab
         // This will vary based on Wire's UI structure
-        val rootNode = rootInActiveWindow ?: return
+        val rootNode = rootInActiveWindow
+        if (rootNode == null) {
+            sendErrorBroadcast("Could not access Wire app window. Please ensure Wire app is open and try again.")
+            return
+        }
 
         // Look for contacts list or conversations
         val contactsList = findContactsList(rootNode)
@@ -147,10 +168,23 @@ class WireAutomationService : AccessibilityService() {
             delay(2000)
         }
 
-        // Get all contact items
-        val contactItems = getAllContactItems(rootInActiveWindow ?: return)
+        // Get all contact items - refresh root node after navigation
+        val currentRoot = rootInActiveWindow
+        if (currentRoot == null) {
+            sendErrorBroadcast("Could not access Wire app window. Please ensure Wire app is open and try again.")
+            return
+        }
+        
+        val contactItems = getAllContactItems(currentRoot)
+        
+        if (contactItems.isEmpty()) {
+            updateNotification("No contacts found")
+            sendErrorBroadcast("No contacts found in Wire app. Please ensure you have contacts and try again.")
+            return
+        }
         
         updateNotification("Found ${contactItems.size} contacts. Sending messages...")
+        sendProgressBroadcast("Found ${contactItems.size} contacts. Sending messages...")
 
         for ((index, contactNode) in contactItems.withIndex()) {
             if (contactsProcessed >= maxContacts) break
@@ -192,6 +226,7 @@ class WireAutomationService : AccessibilityService() {
                         contactsProcessed++
                         
                         updateNotification("Sent to $contactsProcessed contacts...")
+                        sendProgressBroadcast("Sent to $contactsProcessed contacts...", contactsProcessed)
                     }
                 }
 
@@ -214,6 +249,7 @@ class WireAutomationService : AccessibilityService() {
             .apply()
         
         updateNotification("Completed! Sent to $contactsProcessed contacts.")
+        sendCompletionBroadcast(contactsProcessed)
         
         // Show toast
         scope.launch(Dispatchers.Main) {
@@ -401,6 +437,40 @@ class WireAutomationService : AccessibilityService() {
             NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification)
         } catch (e: Exception) {
             // Don't crash if notification fails
+            e.printStackTrace()
+        }
+    }
+    
+    private fun sendProgressBroadcast(text: String, contactsSent: Int = 0) {
+        try {
+            val intent = Intent(ACTION_PROGRESS_UPDATE).apply {
+                putExtra(EXTRA_PROGRESS_TEXT, text)
+                putExtra(EXTRA_CONTACTS_SENT, contactsSent)
+            }
+            LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+    
+    private fun sendCompletionBroadcast(contactsSent: Int) {
+        try {
+            val intent = Intent(ACTION_COMPLETED).apply {
+                putExtra(EXTRA_CONTACTS_SENT, contactsSent)
+            }
+            LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+    
+    private fun sendErrorBroadcast(errorMessage: String) {
+        try {
+            val intent = Intent(ACTION_ERROR).apply {
+                putExtra(EXTRA_ERROR_MESSAGE, errorMessage)
+            }
+            LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+        } catch (e: Exception) {
             e.printStackTrace()
         }
     }
