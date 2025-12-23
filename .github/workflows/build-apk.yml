@@ -41,27 +41,34 @@ jobs:
         ANDROID_HOME: ${{ env.ANDROID_HOME }}
         ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
     
-    - name: Find APK
+    - name: Find and List APK Files
       run: |
-        find app/build/outputs -name "*.apk" -type f
-        ls -la app/build/outputs/apk/release/ || echo "Release folder not found"
-        ls -la app/build/outputs/apk/ || echo "APK folder not found"
+        echo "=== Searching for APK files ==="
+        find app/build/outputs -name "*.apk" -type f || echo "No APK files found"
+        echo ""
+        echo "=== Debug APK location ==="
+        ls -lah app/build/outputs/apk/debug/ || echo "Debug folder not found"
+        echo ""
+        echo "=== Release APK location ==="
+        ls -lah app/build/outputs/apk/release/ || echo "Release folder not found"
     
     - name: Upload Debug APK
       uses: actions/upload-artifact@v4
       with:
         name: app-debug-apk
-        path: app/build/outputs/apk/debug/*.apk
+        path: |
+          app/build/outputs/apk/debug/*.apk
         retention-days: 30
-        if-no-files-found: warn
+        if-no-files-found: error
     
     - name: Upload Release APK
       uses: actions/upload-artifact@v4
       with:
         name: app-release-apk
-        path: app/build/outputs/apk/release/*.apk
+        path: |
+          app/build/outputs/apk/release/*.apk
         retention-days: 30
-        if-no-files-found: warn
+        if-no-files-found: error
     
     # Release creation removed - use Artifacts instead (no permissions needed)
     # The APK is available in the Artifacts section after build completes
