@@ -431,16 +431,21 @@ class MainActivity : AppCompatActivity() {
             val alternativePackages = listOf("ch.wire", "wire")
             val allPackages = listOf(primaryPackage) + alternativePackages
             
+            android.util.Log.i("WireCheck", "Starting Wire app detection...")
+            android.util.Log.i("WireCheck", "Checking packages: $allPackages")
+            
             // Method 1: Try to get launch intent (most reliable - works if app is enabled)
             for (pkg in allPackages) {
                 try {
                     val launchIntent = packageManager.getLaunchIntentForPackage(pkg)
                     if (launchIntent != null) {
-                        android.util.Log.d("WireCheck", "Wire app found via launch intent: $pkg")
+                        android.util.Log.i("WireCheck", "✓ Wire app FOUND via launch intent: $pkg")
                         return true
+                    } else {
+                        android.util.Log.d("WireCheck", "Launch intent is null for: $pkg")
                     }
                 } catch (e: Exception) {
-                    android.util.Log.d("WireCheck", "Launch intent check failed for $pkg: ${e.message}")
+                    android.util.Log.w("WireCheck", "Launch intent check failed for $pkg: ${e.message}")
                 }
             }
             
@@ -449,53 +454,73 @@ class MainActivity : AppCompatActivity() {
                 try {
                     val packageInfo = packageManager.getPackageInfo(pkg, PackageManager.GET_ACTIVITIES)
                     if (packageInfo != null) {
-                        android.util.Log.d("WireCheck", "Wire app found via package info: $pkg")
+                        android.util.Log.i("WireCheck", "✓ Wire app FOUND via package info: $pkg")
+                        android.util.Log.d("WireCheck", "Package version: ${packageInfo.versionName}, versionCode: ${packageInfo.versionCode}")
                         return true
                     }
                 } catch (e: PackageManager.NameNotFoundException) {
                     // Package not found, continue
-                    android.util.Log.d("WireCheck", "Package not found: $pkg")
+                    android.util.Log.d("WireCheck", "Package not found (NameNotFoundException): $pkg")
                 } catch (e: Exception) {
-                    android.util.Log.d("WireCheck", "Package info check failed for $pkg: ${e.message}")
+                    android.util.Log.w("WireCheck", "Package info check failed for $pkg: ${e.message}")
                 }
             }
             
             // Method 3: Check installed packages list (most comprehensive)
             try {
+                android.util.Log.d("WireCheck", "Checking installed packages list...")
                 val installedPackages = packageManager.getInstalledPackages(PackageManager.GET_ACTIVITIES)
+                android.util.Log.d("WireCheck", "Total installed packages: ${installedPackages.size}")
+                
+                // Log first few package names for debugging
+                if (installedPackages.isNotEmpty()) {
+                    val samplePackages = installedPackages.take(10).map { it.packageName }
+                    android.util.Log.d("WireCheck", "Sample packages: $samplePackages")
+                }
+                
                 for (pkg in allPackages) {
                     val found = installedPackages.any { it.packageName == pkg }
                     if (found) {
-                        android.util.Log.d("WireCheck", "Wire app found in installed packages: $pkg")
+                        android.util.Log.i("WireCheck", "✓ Wire app FOUND in installed packages list: $pkg")
                         return true
+                    } else {
+                        android.util.Log.d("WireCheck", "Package $pkg not in installed packages list")
                     }
                 }
+            } catch (e: SecurityException) {
+                android.util.Log.e("WireCheck", "SecurityException: Missing <queries> declaration in manifest? ${e.message}")
             } catch (e: Exception) {
                 android.util.Log.e("WireCheck", "Error getting installed packages: ${e.message}", e)
             }
             
-            // Method 4: Try with MATCH_UNINSTALLED_PACKAGES flag (for some edge cases)
-            for (pkg in allPackages) {
-                try {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Method 4: Try with PackageInfoFlags (Android 13+)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                for (pkg in allPackages) {
+                    try {
                         val packageInfo = packageManager.getPackageInfo(
                             pkg, 
                             PackageManager.PackageInfoFlags.of(PackageManager.GET_ACTIVITIES.toLong())
                         )
                         if (packageInfo != null) {
-                            android.util.Log.d("WireCheck", "Wire app found via PackageInfoFlags: $pkg")
+                            android.util.Log.i("WireCheck", "✓ Wire app FOUND via PackageInfoFlags: $pkg")
                             return true
                         }
+                    } catch (e: Exception) {
+                        android.util.Log.d("WireCheck", "PackageInfoFlags check failed for $pkg: ${e.message}")
                     }
-                } catch (e: Exception) {
-                    // Continue
                 }
             }
             
-            android.util.Log.w("WireCheck", "Wire app not found using any method")
+            android.util.Log.w("WireCheck", "✗ Wire app NOT FOUND using any method")
+            android.util.Log.w("WireCheck", "Please ensure:")
+            android.util.Log.w("WireCheck", "1. Wire app is installed from Play Store")
+            android.util.Log.w("WireCheck", "2. <queries> declaration is in AndroidManifest.xml")
+            android.util.Log.w("WireCheck", "3. App has proper permissions")
+            
             false
         } catch (e: Exception) {
             android.util.Log.e("WireCheck", "Critical error checking Wire app: ${e.message}", e)
+            e.printStackTrace()
             false
         }
     }
