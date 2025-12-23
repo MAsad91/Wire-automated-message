@@ -92,6 +92,12 @@ class MainActivity : AppCompatActivity() {
         val savedMessage = prefs.getString("saved_message", "")
         if (!savedMessage.isNullOrEmpty()) {
             etMessage.setText(savedMessage)
+            // Move cursor to top
+            etMessage.setSelection(0)
+        } else {
+            // Ensure cursor starts at top for new messages
+            etMessage.requestFocus()
+            etMessage.setSelection(0)
         }
     }
 
