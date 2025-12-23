@@ -63,21 +63,6 @@ jobs:
         retention-days: 30
         if-no-files-found: warn
     
-    - name: Upload APK as Release Asset (Optional)
-      if: github.event_name == 'workflow_dispatch'
-      uses: softprops/action-gh-release@v1
-      with:
-        files: app/build/outputs/apk/release/app-release.apk
-        tag_name: v1.0.0
-        name: Wire Auto Messenger APK
-        body: |
-          Built APK for Wire Auto Messenger
-          
-          **Installation:**
-          1. Download this APK
-          2. Enable "Install from Unknown Sources" on your Android device
-          3. Install the APK
-          4. Follow the installation guide in README.md
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    # Release creation removed - use Artifacts instead (no permissions needed)
+    # The APK is available in the Artifacts section after build completes
 
