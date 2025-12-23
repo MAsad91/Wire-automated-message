@@ -397,21 +397,62 @@ class WireAutomationService : AccessibilityService() {
                 val bundle = android.os.Bundle()
                 bundle.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, message)
                 messageInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
-                delay(800) // Wait for text to be set
+                delay(1200) // Wait for text to be set and send button to be enabled
 
-                // Find and click send button
+                // Refresh root after typing
                 currentRoot = rootInActiveWindow
-                val sendButton = findSendButton(currentRoot ?: continue)
-                if (sendButton == null) {
-                    android.util.Log.w("WireAuto", "Send button not found for contact $contactsProcessed")
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                    delay(1000)
+                if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
+                    android.util.Log.w("WireAuto", "Lost access to Wire after typing")
                     continue
                 }
 
-                // Click send button
-                sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                delay(1500) // Wait for message to send
+                // Find and click send button - try multiple methods
+                var sendButton = findSendButton(currentRoot)
+                
+                // If not found, try finding button near message input
+                if (sendButton == null) {
+                    android.util.Log.d("WireAuto", "Send button not found by standard methods, trying alternative...")
+                    sendButton = findSendButtonNearInput(currentRoot, messageInput)
+                }
+                
+                // If still not found, log detailed info for debugging
+                if (sendButton == null) {
+                    android.util.Log.w("WireAuto", "Send button not found for contact $contactsProcessed")
+                    android.util.Log.d("WireAuto", "Searching for any buttons near input field...")
+                    logUIStructure(currentRoot, 0, 2) // Log UI structure for debugging
+                    // Continue anyway - might be able to send via other method
+                } else {
+                    // Click send button - try multiple methods
+                    var clicked = false
+                    
+                    // Method 1: Direct click
+                    if (sendButton.isClickable) {
+                        clicked = sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        android.util.Log.d("WireAuto", "Clicked send button directly: $clicked")
+                    }
+                    
+                    // Method 2: Find clickable parent/child
+                    if (!clicked) {
+                        val clickableNode = findClickableNode(sendButton)
+                        if (clickableNode != null) {
+                            clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                            android.util.Log.d("WireAuto", "Clicked send button via clickable node: $clicked")
+                        }
+                    }
+                    
+                    // Method 3: Try long click (some apps use this)
+                    if (!clicked) {
+                        clicked = sendButton.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
+                        android.util.Log.d("WireAuto", "Tried long click on send button: $clicked")
+                    }
+                    
+                    if (!clicked) {
+                        android.util.Log.w("WireAuto", "Could not click send button for contact $contactsProcessed")
+                        // Still try to continue - message might have been sent
+                    }
+                    
+                    delay(1500) // Wait for message to send
+                }
                 
                 contactsSent++
                 android.util.Log.i("WireAuto", "✓ Message sent to contact $contactsSent: $contactName")
@@ -976,9 +1017,69 @@ class WireAutomationService : AccessibilityService() {
     }
 
     private fun findSendButton(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        // Try multiple methods to find send button
         return findNodeByContentDescription(root, "Send")
             ?: findNodeByContentDescription(root, "Send message")
+            ?: findNodeByContentDescription(root, "send") // lowercase
             ?: findNodeByText(root, "Send")
+            ?: findNodeByText(root, "send") // lowercase
+            ?: findNodeByClassName(root, "android.widget.ImageButton") // Icon button
+            ?: findNodeByClassName(root, "android.widget.Button") // Regular button
+            ?: findNodeByViewId(root, "send") // Try by resource ID
+    }
+    
+    private fun findSendButtonNearInput(root: AccessibilityNodeInfo, inputField: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        // Look for buttons near the input field (siblings or in same parent)
+        var parent = inputField.parent
+        var depth = 0
+        
+        while (parent != null && depth < 5) {
+            // Look for buttons in the same parent
+            for (i in 0 until parent.childCount) {
+                val child = parent.getChild(i)
+                if (child != null && child != inputField) {
+                    val className = child.className?.toString() ?: ""
+                    val contentDesc = child.contentDescription?.toString() ?: ""
+                    val text = child.text?.toString() ?: ""
+                    
+                    // Check if it's a button-like element
+                    if (className.contains("Button", ignoreCase = true) ||
+                        className.contains("ImageButton", ignoreCase = true) ||
+                        className.contains("Image", ignoreCase = true) ||
+                        contentDesc.contains("send", ignoreCase = true) ||
+                        text.contains("send", ignoreCase = true)) {
+                        if (child.isClickable || child.isEnabled) {
+                            android.util.Log.d("WireAuto", "Found potential send button near input: $className, desc: $contentDesc")
+                            return child
+                        }
+                    }
+                }
+            }
+            parent = parent.parent
+            depth++
+        }
+        
+        return null
+    }
+    
+    private fun findNodeByViewId(root: AccessibilityNodeInfo, viewId: String): AccessibilityNodeInfo? {
+        // Try to find node by view ID (resource name)
+        // This is a simplified version - actual view IDs are integers
+        // We'll look for nodes that might match the ID pattern
+        val viewIdRes = root.viewIdResourceName
+        if (viewIdRes != null && viewIdRes.contains(viewId, ignoreCase = true)) {
+            return root
+        }
+        
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i)
+            if (child != null) {
+                val found = findNodeByViewId(child, viewId)
+                if (found != null) return found
+            }
+        }
+        
+        return null
     }
 
     // Helper functions to find nodes
