@@ -33,12 +33,19 @@ jobs:
         ANDROID_HOME: ${{ env.ANDROID_HOME }}
         ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
     
+    - name: Find APK
+      run: |
+        find app/build/outputs -name "*.apk" -type f
+        ls -la app/build/outputs/apk/release/ || echo "Release folder not found"
+        ls -la app/build/outputs/apk/ || echo "APK folder not found"
+    
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
         name: app-release-apk
-        path: app/build/outputs/apk/release/app-release.apk
+        path: app/build/outputs/apk/**/*.apk
         retention-days: 30
+        if-no-files-found: warn
     
     - name: Upload APK as Release Asset (Optional)
       if: github.event_name == 'workflow_dispatch'
