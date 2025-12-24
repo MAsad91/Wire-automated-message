@@ -59,6 +59,13 @@ class MainActivity : AppCompatActivity() {
                     val contactsSent = intent.getIntExtra(WireAutomationService.EXTRA_CONTACTS_SENT, 0)
                     updateProgress(progressText, contactsSent)
                 }
+                WireAutomationService.ACTION_CONTACT_UPDATE -> {
+                    val contactName = intent.getStringExtra(WireAutomationService.EXTRA_CONTACT_NAME) ?: ""
+                    val status = intent.getStringExtra(WireAutomationService.EXTRA_CONTACT_STATUS) ?: ""
+                    val position = intent.getIntExtra(WireAutomationService.EXTRA_CONTACT_POSITION, 0)
+                    val error = intent.getStringExtra(WireAutomationService.EXTRA_CONTACT_ERROR)
+                    onContactUpdate(contactName, status, position, error)
+                }
                 WireAutomationService.ACTION_COMPLETED -> {
                     val contactsSent = intent.getIntExtra(WireAutomationService.EXTRA_CONTACTS_SENT, 0)
                     onSendingCompleted(contactsSent)
@@ -143,6 +150,7 @@ class MainActivity : AppCompatActivity() {
             addAction(WireAutomationService.ACTION_PROGRESS_UPDATE)
             addAction(WireAutomationService.ACTION_COMPLETED)
             addAction(WireAutomationService.ACTION_ERROR)
+            addAction(WireAutomationService.ACTION_CONTACT_UPDATE)
         }
         LocalBroadcastManager.getInstance(this).registerReceiver(messageBroadcastReceiver, filter)
     }
@@ -415,6 +423,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         saveMessage()
+        
+        // Clear previous contact updates
+        contactUpdates.clear()
         
         // Check if API credentials are configured
         val appId = prefs.getString("wire_app_id", "")?.trim()
@@ -773,10 +784,13 @@ class MainActivity : AppCompatActivity() {
             }
             Toast.makeText(this, toastMessage, Toast.LENGTH_LONG).show()
             
-            // Reset UI after 3 seconds
+            // Show detailed results dialog
+            showResultsDialog(contactsSent, totalContacts)
+            
+            // Reset UI after 5 seconds (longer to allow viewing results)
             btnSendNow.postDelayed({
                 resetSendingUI()
-            }, 3000)
+            }, 5000)
         }
     }
     
@@ -796,6 +810,130 @@ class MainActivity : AppCompatActivity() {
             // Show detailed error dialog with scrollable text
             showDetailedErrorDialog(errorMessage)
         }
+    }
+    
+    private fun showResultsDialog(contactsSent: Int, totalContacts: Int) {
+        // Get results from SharedPreferences (stored by service)
+        val resultsJson = prefs.getString("last_contact_results", null)
+        val results = if (resultsJson != null) {
+            try {
+                com.google.gson.Gson().fromJson(
+                    resultsJson,
+                    Array<com.wireautomessenger.model.ContactResult>::class.java
+                ).toList().sortedBy { it.position }
+            } catch (e: Exception) {
+                contactUpdates.sortedBy { it.position }
+            }
+        } else {
+            contactUpdates.sortedBy { it.position }
+        }
+        
+        if (results.isEmpty()) {
+            // No detailed results, show simple message
+            MaterialAlertDialogBuilder(this, R.style.Theme_WireAutoMessenger_Dialog)
+                .setTitle("✓ Messages Sent")
+                .setMessage("Successfully sent to $contactsSent out of $totalContacts contacts.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        
+        // Create scrollable list view
+        val scrollView = android.widget.ScrollView(this).apply {
+            layoutParams = android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            setPadding(32, 16, 32, 16)
+        }
+        
+        val linearLayout = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            layoutParams = android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        
+        // Summary
+        val summaryText = TextView(this).apply {
+            text = "Summary:\n" +
+                    "✓ Sent: ${results.count { it.status == com.wireautomessenger.model.ContactStatus.SENT }}\n" +
+                    "✗ Failed: ${results.count { it.status == com.wireautomessenger.model.ContactStatus.FAILED }}\n" +
+                    "⊘ Skipped: ${results.count { it.status == com.wireautomessenger.model.ContactStatus.SKIPPED }}\n" +
+                    "Total: ${results.size}"
+            textSize = 16f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setTextColor(getColor(R.color.on_surface))
+            setPadding(0, 0, 0, 24)
+        }
+        linearLayout.addView(summaryText)
+        
+        // Divider
+        val divider = android.view.View(this).apply {
+            layoutParams = android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                2
+            )
+            setBackgroundColor(getColor(R.color.outline))
+        }
+        linearLayout.addView(divider)
+        
+        // Add space
+        val space = android.view.View(this).apply {
+            layoutParams = android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                16
+            )
+        }
+        linearLayout.addView(space)
+        
+        // List all contacts
+        results.forEach { result ->
+            val statusEmoji = when (result.status) {
+                com.wireautomessenger.model.ContactStatus.SENT -> "✓"
+                com.wireautomessenger.model.ContactStatus.FAILED -> "✗"
+                com.wireautomessenger.model.ContactStatus.SKIPPED -> "⊘"
+            }
+            
+            val statusColor = when (result.status) {
+                com.wireautomessenger.model.ContactStatus.SENT -> getColor(R.color.on_surface)
+                com.wireautomessenger.model.ContactStatus.FAILED -> getColor(R.color.on_error)
+                com.wireautomessenger.model.ContactStatus.SKIPPED -> getColor(R.color.on_surface_variant)
+            }
+            
+            val contactText = TextView(this).apply {
+                text = "$statusEmoji #${result.position}: ${result.name}" +
+                        if (result.errorMessage != null) "\n   Error: ${result.errorMessage}" else ""
+                textSize = 14f
+                setTextColor(statusColor)
+                setPadding(0, 8, 0, 8)
+            }
+            linearLayout.addView(contactText)
+        }
+        
+        scrollView.addView(linearLayout)
+        
+        MaterialAlertDialogBuilder(this, R.style.Theme_WireAutoMessenger_Dialog)
+            .setTitle("📊 Detailed Results")
+            .setView(scrollView)
+            .setPositiveButton("OK", null)
+            .setNeutralButton("Copy All") { _, _ ->
+                val resultsText = results.joinToString("\n") { result ->
+                    val statusEmoji = when (result.status) {
+                        com.wireautomessenger.model.ContactStatus.SENT -> "✓"
+                        com.wireautomessenger.model.ContactStatus.FAILED -> "✗"
+                        com.wireautomessenger.model.ContactStatus.SKIPPED -> "⊘"
+                    }
+                    "$statusEmoji #${result.position}: ${result.name}" +
+                            if (result.errorMessage != null) " - ${result.errorMessage}" else ""
+                }
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                val clip = android.content.ClipData.newPlainText("Results", resultsText)
+                clipboard.setPrimaryClip(clip)
+                Toast.makeText(this, "Results copied to clipboard", Toast.LENGTH_SHORT).show()
+            }
+            .show()
     }
     
     private fun showDetailedErrorDialog(errorMessage: String) {

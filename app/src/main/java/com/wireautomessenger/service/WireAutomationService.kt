@@ -39,11 +39,16 @@ class WireAutomationService : AccessibilityService() {
         const val ACTION_PROGRESS_UPDATE = "com.wireautomessenger.PROGRESS_UPDATE"
         const val ACTION_COMPLETED = "com.wireautomessenger.COMPLETED"
         const val ACTION_ERROR = "com.wireautomessenger.ERROR"
+        const val ACTION_CONTACT_UPDATE = "com.wireautomessenger.CONTACT_UPDATE"
         
         // Broadcast extras
         const val EXTRA_PROGRESS_TEXT = "progress_text"
         const val EXTRA_CONTACTS_SENT = "contacts_sent"
         const val EXTRA_ERROR_MESSAGE = "error_message"
+        const val EXTRA_CONTACT_NAME = "contact_name"
+        const val EXTRA_CONTACT_STATUS = "contact_status" // "sent", "failed", "skipped"
+        const val EXTRA_CONTACT_POSITION = "contact_position"
+        const val EXTRA_CONTACT_ERROR = "contact_error"
     }
 
     override fun onServiceConnected() {
@@ -324,9 +329,12 @@ class WireAutomationService : AccessibilityService() {
         updateNotification("Found $totalContacts contacts. Sending messages...")
         sendProgressBroadcast("Found $totalContacts contacts. Sending messages...", 0)
 
-        // Process contacts - use indices to track progress and avoid duplicates
+        // Process contacts - systematically from top to bottom, no skipping
         val contactsToProcess = contactItems.toList() // Create a copy to avoid modification issues
         val processedContactNames = mutableSetOf<String>() // Track processed contacts to avoid duplicates
+        val contactResults = mutableListOf<com.wireautomessenger.model.ContactResult>()
+        
+        android.util.Log.i("WireAuto", "=== Starting to process ${contactsToProcess.size} contacts from top to bottom ===")
         
         for ((index, contactNode) in contactsToProcess.withIndex()) {
             if (contactsProcessed >= maxContacts) {
@@ -337,9 +345,16 @@ class WireAutomationService : AccessibilityService() {
             try {
                 val contactName = contactNode.text?.toString()?.trim() ?: "Contact ${index + 1}"
                 
-                // Skip if already processed (avoid duplicates)
+                // Skip if already processed (avoid duplicates) - but still track it
                 if (processedContactNames.contains(contactName)) {
                     android.util.Log.d("WireAuto", "Skipping duplicate contact: $contactName")
+                    contactResults.add(com.wireautomessenger.model.ContactResult(
+                        name = contactName,
+                        status = com.wireautomessenger.model.ContactStatus.SKIPPED,
+                        errorMessage = "Duplicate contact",
+                        position = index + 1
+                    ))
+                    sendContactUpdate(contactName, "skipped", index + 1, "Duplicate contact")
                     continue
                 }
                 
@@ -351,11 +366,35 @@ class WireAutomationService : AccessibilityService() {
                 updateNotification("Sending to contact $contactsProcessed/$totalContacts: $contactName...")
                 sendProgressBroadcast("Sending to contact $contactsProcessed/$totalContacts: $contactName...", contactsSent)
                 
-                // Ensure we're in Wire app
+                // Ensure we're in Wire app - if not, try to launch it in background
                 var currentRoot = rootInActiveWindow
                 if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
-                    android.util.Log.w("WireAuto", "Not in Wire app, skipping contact")
-                    continue
+                    android.util.Log.w("WireAuto", "Not in Wire app, attempting to launch...")
+                    // Try to launch Wire in background (minimize our app)
+                    try {
+                        val wireIntent = packageManager.getLaunchIntentForPackage(WIRE_PACKAGE)
+                        if (wireIntent != null) {
+                            wireIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            wireIntent.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
+                            startActivity(wireIntent)
+                            delay(3000) // Wait for Wire to open
+                            currentRoot = rootInActiveWindow
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("WireAuto", "Failed to launch Wire", e)
+                    }
+                    
+                    if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
+                        android.util.Log.w("WireAuto", "Still not in Wire app, marking as failed")
+                        contactResults.add(com.wireautomessenger.model.ContactResult(
+                            name = contactName,
+                            status = com.wireautomessenger.model.ContactStatus.FAILED,
+                            errorMessage = "Wire app not accessible",
+                            position = index + 1
+                        ))
+                        sendContactUpdate(contactName, "failed", index + 1, "Wire app not accessible")
+                        continue
+                    }
                 }
                 
                 // If we're in a conversation (have message input), go back to list first
@@ -395,7 +434,14 @@ class WireAutomationService : AccessibilityService() {
                 }
                 
                 if (!clicked) {
-                    android.util.Log.w("WireAuto", "Could not click contact, skipping")
+                    android.util.Log.w("WireAuto", "Could not click contact: $contactName")
+                    contactResults.add(com.wireautomessenger.model.ContactResult(
+                        name = contactName,
+                        status = com.wireautomessenger.model.ContactStatus.FAILED,
+                        errorMessage = "Could not click contact",
+                        position = index + 1
+                    ))
+                    sendContactUpdate(contactName, "failed", index + 1, "Could not click contact")
                     continue
                 }
                 
@@ -404,18 +450,32 @@ class WireAutomationService : AccessibilityService() {
                 // Verify we're in conversation view
                 currentRoot = rootInActiveWindow
                 if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
-                    android.util.Log.w("WireAuto", "Not in Wire app after clicking contact")
+                    android.util.Log.w("WireAuto", "Not in Wire app after clicking contact: $contactName")
                     performGlobalAction(GLOBAL_ACTION_BACK)
                     delay(1000)
+                    contactResults.add(com.wireautomessenger.model.ContactResult(
+                        name = contactName,
+                        status = com.wireautomessenger.model.ContactStatus.FAILED,
+                        errorMessage = "Lost access after clicking contact",
+                        position = index + 1
+                    ))
+                    sendContactUpdate(contactName, "failed", index + 1, "Lost access after clicking")
                     continue
                 }
 
                 // Find message input field - try multiple methods
                 val messageInput = findMessageInput(currentRoot)
                 if (messageInput == null) {
-                    android.util.Log.w("WireAuto", "Message input not found for contact $contactsProcessed")
+                    android.util.Log.w("WireAuto", "Message input not found for contact: $contactName")
                     performGlobalAction(GLOBAL_ACTION_BACK)
                     delay(1000)
+                    contactResults.add(com.wireautomessenger.model.ContactResult(
+                        name = contactName,
+                        status = com.wireautomessenger.model.ContactStatus.FAILED,
+                        errorMessage = "Message input not found",
+                        position = index + 1
+                    ))
+                    sendContactUpdate(contactName, "failed", index + 1, "Message input not found")
                     continue
                 }
 
@@ -438,7 +498,16 @@ class WireAutomationService : AccessibilityService() {
                 // Refresh root after typing
                 currentRoot = rootInActiveWindow
                 if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
-                    android.util.Log.w("WireAuto", "Lost access to Wire after typing")
+                    android.util.Log.w("WireAuto", "Lost access to Wire after typing: $contactName")
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    delay(1000)
+                    contactResults.add(com.wireautomessenger.model.ContactResult(
+                        name = contactName,
+                        status = com.wireautomessenger.model.ContactStatus.FAILED,
+                        errorMessage = "Lost access after typing",
+                        position = index + 1
+                    ))
+                    sendContactUpdate(contactName, "failed", index + 1, "Lost access after typing")
                     continue
                 }
 
@@ -504,12 +573,25 @@ class WireAutomationService : AccessibilityService() {
                     android.util.Log.w("WireAuto", "Send button not found for contact $contactsProcessed")
                 }
                 
-                // Only count as sent if message was actually sent
+                // Track result for this contact
                 if (messageSent) {
                     contactsSent++
                     android.util.Log.i("WireAuto", "✓ Message successfully sent to contact $contactsSent/$totalContacts: $contactName")
+                    contactResults.add(com.wireautomessenger.model.ContactResult(
+                        name = contactName,
+                        status = com.wireautomessenger.model.ContactStatus.SENT,
+                        position = index + 1
+                    ))
+                    sendContactUpdate(contactName, "sent", index + 1, null)
                 } else {
                     android.util.Log.w("WireAuto", "✗ Failed to send message to contact: $contactName")
+                    contactResults.add(com.wireautomessenger.model.ContactResult(
+                        name = contactName,
+                        status = com.wireautomessenger.model.ContactStatus.FAILED,
+                        errorMessage = "Send button not found or not clickable",
+                        position = index + 1
+                    ))
+                    sendContactUpdate(contactName, "failed", index + 1, "Send button not found or not clickable")
                 }
                 
                 updateNotification("Sent to $contactsSent/$totalContacts contacts...")
@@ -545,6 +627,8 @@ class WireAutomationService : AccessibilityService() {
             .putLong("last_send_time", System.currentTimeMillis())
             .putBoolean("sending_complete", true)
             .putInt("last_contacts_sent", contactsSent)
+            .putInt("last_contacts_processed", contactsProcessed)
+            .putInt("last_total_contacts", totalContacts)
             .apply()
         
         val finalMessage = if (contactsSent > 0) {
@@ -554,7 +638,14 @@ class WireAutomationService : AccessibilityService() {
         }
         
         updateNotification(finalMessage)
-        sendCompletionBroadcast(contactsSent)
+        sendCompletionBroadcast(contactsSent, contactResults)
+        
+        android.util.Log.i("WireAuto", "=== Final Results ===")
+        android.util.Log.i("WireAuto", "Total contacts in list: $totalContacts")
+        android.util.Log.i("WireAuto", "Contacts processed: $contactsProcessed")
+        android.util.Log.i("WireAuto", "Messages sent successfully: $contactsSent")
+        android.util.Log.i("WireAuto", "Failed: ${contactResults.count { it.status == com.wireautomessenger.model.ContactStatus.FAILED }}")
+        android.util.Log.i("WireAuto", "Skipped: ${contactResults.count { it.status == com.wireautomessenger.model.ContactStatus.SKIPPED }}")
         
         // Show toast
         scope.launch(Dispatchers.Main) {
@@ -1318,10 +1409,29 @@ class WireAutomationService : AccessibilityService() {
         }
     }
     
-    private fun sendCompletionBroadcast(contactsSent: Int) {
+    private fun sendContactUpdate(contactName: String, status: String, position: Int, errorMessage: String?) {
+        try {
+            val intent = Intent(ACTION_CONTACT_UPDATE).apply {
+                putExtra(EXTRA_CONTACT_NAME, contactName)
+                putExtra(EXTRA_CONTACT_STATUS, status)
+                putExtra(EXTRA_CONTACT_POSITION, position)
+                if (errorMessage != null) {
+                    putExtra(EXTRA_CONTACT_ERROR, errorMessage)
+                }
+            }
+            LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+    
+    private fun sendCompletionBroadcast(contactsSent: Int, contactResults: List<com.wireautomessenger.model.ContactResult>) {
         try {
             val intent = Intent(ACTION_COMPLETED).apply {
                 putExtra(EXTRA_CONTACTS_SENT, contactsSent)
+                // Store results in SharedPreferences for MainActivity to retrieve
+                val resultsJson = com.google.gson.Gson().toJson(contactResults)
+                prefs.edit().putString("last_contact_results", resultsJson).apply()
             }
             LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
         } catch (e: Exception) {
