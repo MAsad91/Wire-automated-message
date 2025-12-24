@@ -331,7 +331,7 @@ class WireAutomationService : AccessibilityService() {
 
         // Process contacts - systematically from top to bottom, no skipping
         val contactsToProcess = contactItems.toList() // Create a copy to avoid modification issues
-        val processedContactNames = mutableSetOf<String>() // Track processed contacts to avoid duplicates
+        val processedContactIndices = mutableSetOf<Int>() // Track processed contacts by index to avoid duplicates
         val contactResults = mutableListOf<com.wireautomessenger.model.ContactResult>()
         
         android.util.Log.i("WireAuto", "=== Starting to process ${contactsToProcess.size} contacts from top to bottom ===")
@@ -345,13 +345,14 @@ class WireAutomationService : AccessibilityService() {
             try {
                 val contactName = contactNode.text?.toString()?.trim() ?: "Contact ${index + 1}"
                 
-                // Skip if already processed (avoid duplicates) - but still track it
-                if (processedContactNames.contains(contactName)) {
-                    android.util.Log.d("WireAuto", "Skipping duplicate contact: $contactName")
+                // Skip if already processed by index (avoid duplicates) - but still track it
+                // Using index instead of name because different contacts can have the same name
+                if (processedContactIndices.contains(index)) {
+                    android.util.Log.d("WireAuto", "Skipping duplicate contact at index $index: $contactName")
                     contactResults.add(com.wireautomessenger.model.ContactResult(
                         name = contactName,
                         status = com.wireautomessenger.model.ContactStatus.SKIPPED,
-                        errorMessage = "Duplicate contact",
+                        errorMessage = "Duplicate contact (already processed at this position)",
                         position = index + 1
                     ))
                     sendContactUpdate(contactName, "skipped", index + 1, "Duplicate contact")
@@ -359,7 +360,7 @@ class WireAutomationService : AccessibilityService() {
                 }
                 
                 contactsProcessed++
-                processedContactNames.add(contactName)
+                processedContactIndices.add(index)
                 
                 android.util.Log.i("WireAuto", "=== Processing contact $contactsProcessed/$totalContacts: $contactName ===")
                 
@@ -454,25 +455,52 @@ class WireAutomationService : AccessibilityService() {
                     ?: contactNode
                 
                 android.util.Log.d("WireAuto", "Attempting to click contact: $contactName (clean: $cleanContactName)")
+                android.util.Log.d("WireAuto", "Contact node: clickable=${refreshedContactNode.isClickable}, className=${refreshedContactNode.className}, text=${refreshedContactNode.text}")
+                
+                // Find the clickable container for this contact (the actual row/item that's clickable)
+                val clickableContainer = findClickableContainer(refreshedContactNode)
+                val nodeToClick = clickableContainer ?: refreshedContactNode
+                
+                android.util.Log.d("WireAuto", "Using node: clickable=${nodeToClick.isClickable}, className=${nodeToClick.className}")
                 
                 // Try multiple click methods
                 var clicked = false
                 
-                // Method 1: Direct click on node
-                if (refreshedContactNode.isClickable) {
-                    clicked = refreshedContactNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    android.util.Log.d("WireAuto", "Method 1 - Direct click: $clicked")
+                // Method 1: Direct click on clickable container
+                if (nodeToClick.isClickable) {
+                    clicked = nodeToClick.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    android.util.Log.d("WireAuto", "Method 1 - Direct click on container: $clicked")
                 }
                 
-                // Method 2: Find clickable parent
+                // Method 2: Find clickable parent (go up the tree to find the row container)
                 if (!clicked) {
-                    var parent = refreshedContactNode.parent
+                    var parent = nodeToClick.parent
                     var depth = 0
-                    while (parent != null && depth < 5 && !clicked) {
-                        if (parent.isClickable) {
-                            clicked = parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            android.util.Log.d("WireAuto", "Method 2 - Clicked parent at depth $depth: $clicked")
-                            break
+                    while (parent != null && depth < 8 && !clicked) { // Increased depth to 8
+                        val parentClassName = parent.className?.toString() ?: ""
+                        val isLikelyRow = parentClassName.contains("RecyclerView", ignoreCase = true) ||
+                                         parentClassName.contains("ViewGroup", ignoreCase = true) ||
+                                         parentClassName.contains("LinearLayout", ignoreCase = true) ||
+                                         parentClassName.contains("RelativeLayout", ignoreCase = true) ||
+                                         parentClassName.contains("ConstraintLayout", ignoreCase = true)
+                        
+                        if (parent.isClickable || (isLikelyRow && depth >= 2)) {
+                            // Try clicking even if not explicitly clickable if it's a row container
+                            if (parent.isClickable) {
+                                clicked = parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                android.util.Log.d("WireAuto", "Method 2 - Clicked parent at depth $depth (clickable): $clicked")
+                            } else if (isLikelyRow) {
+                                // Try to find clickable child in this row
+                                for (i in 0 until parent.childCount) {
+                                    val child = parent.getChild(i)
+                                    if (child != null && child.isClickable) {
+                                        clicked = child.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                        android.util.Log.d("WireAuto", "Method 2 - Clicked clickable child in row at depth $depth: $clicked")
+                                        if (clicked) break
+                                    }
+                                }
+                            }
+                            if (clicked) break
                         }
                         parent = parent.parent
                         depth++
@@ -1521,6 +1549,51 @@ class WireAutomationService : AccessibilityService() {
         }
         
         return null
+    }
+    
+    private fun findClickableContainer(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        // Find the actual clickable container (row/item) that wraps this contact
+        // This is typically a ViewGroup, RecyclerView item, or LinearLayout that contains the contact info
+        
+        // First, check if the node itself is a container
+        val className = node.className?.toString() ?: ""
+        val isContainer = className.contains("ViewGroup", ignoreCase = true) ||
+                         className.contains("LinearLayout", ignoreCase = true) ||
+                         className.contains("RelativeLayout", ignoreCase = true) ||
+                         className.contains("ConstraintLayout", ignoreCase = true) ||
+                         className.contains("FrameLayout", ignoreCase = true) ||
+                         className.contains("RecyclerView", ignoreCase = true) ||
+                         className.contains("ListView", ignoreCase = true)
+        
+        if (isContainer && node.isClickable) {
+            return node
+        }
+        
+        // Go up the tree to find the container
+        var parent = node.parent
+        var depth = 0
+        while (parent != null && depth < 10) {
+            val parentClassName = parent.className?.toString() ?: ""
+            val isParentContainer = parentClassName.contains("ViewGroup", ignoreCase = true) ||
+                                   parentClassName.contains("LinearLayout", ignoreCase = true) ||
+                                   parentClassName.contains("RelativeLayout", ignoreCase = true) ||
+                                   parentClassName.contains("ConstraintLayout", ignoreCase = true) ||
+                                   parentClassName.contains("FrameLayout", ignoreCase = true) ||
+                                   parentClassName.contains("RecyclerView", ignoreCase = true) ||
+                                   parentClassName.contains("ListView", ignoreCase = true) ||
+                                   parentClassName.contains("CardView", ignoreCase = true)
+            
+            // If it's a container and clickable, or if it's a container at depth 2-5 (likely the row)
+            if (isParentContainer && (parent.isClickable || (depth >= 2 && depth <= 5))) {
+                return parent
+            }
+            
+            parent = parent.parent
+            depth++
+        }
+        
+        // If no container found, return the clickable node itself
+        return findClickableNode(node)
     }
 
     private fun createNotificationChannel() {
