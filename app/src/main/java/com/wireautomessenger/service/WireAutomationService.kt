@@ -447,33 +447,105 @@ class WireAutomationService : AccessibilityService() {
                 
                 // Refresh contact node from current root (contactNode might be stale)
                 // Try to find the contact by its text in the current root
+                // Handle contacts with "You:" prefix by extracting the actual name
+                val cleanContactName = contactName.removePrefix("You: ").trim()
                 val refreshedContactNode = findContactNodeByText(currentRoot, contactName)
-                val nodeToClick = refreshedContactNode ?: contactNode
+                    ?: findContactNodeByText(currentRoot, cleanContactName)
+                    ?: contactNode
                 
-                android.util.Log.d("WireAuto", "Attempting to click contact: $contactName")
+                android.util.Log.d("WireAuto", "Attempting to click contact: $contactName (clean: $cleanContactName)")
                 
-                // Click on contact - try multiple methods
+                // Try multiple click methods
                 var clicked = false
-                if (nodeToClick.isClickable) {
-                    clicked = nodeToClick.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    android.util.Log.d("WireAuto", "Clicked contact directly: $clicked")
+                
+                // Method 1: Direct click on node
+                if (refreshedContactNode.isClickable) {
+                    clicked = refreshedContactNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    android.util.Log.d("WireAuto", "Method 1 - Direct click: $clicked")
                 }
                 
+                // Method 2: Find clickable parent
                 if (!clicked) {
-                    // Try to find clickable parent or child
-                    val clickableNode = findClickableNode(nodeToClick)
+                    var parent = refreshedContactNode.parent
+                    var depth = 0
+                    while (parent != null && depth < 5 && !clicked) {
+                        if (parent.isClickable) {
+                            clicked = parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                            android.util.Log.d("WireAuto", "Method 2 - Clicked parent at depth $depth: $clicked")
+                            break
+                        }
+                        parent = parent.parent
+                        depth++
+                    }
+                }
+                
+                // Method 3: Find clickable child
+                if (!clicked) {
+                    for (i in 0 until refreshedContactNode.childCount) {
+                        val child = refreshedContactNode.getChild(i)
+                        if (child != null && child.isClickable) {
+                            clicked = child.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                            android.util.Log.d("WireAuto", "Method 3 - Clicked child $i: $clicked")
+                            if (clicked) break
+                        }
+                    }
+                }
+                
+                // Method 4: Use findClickableNode helper
+                if (!clicked) {
+                    val clickableNode = findClickableNode(refreshedContactNode)
                     if (clickableNode != null) {
                         clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                        android.util.Log.d("WireAuto", "Clicked contact via clickable node: $clicked")
+                        android.util.Log.d("WireAuto", "Method 4 - Clicked via findClickableNode: $clicked")
+                    }
+                }
+                
+                // Method 5: Try long click (some apps use this)
+                if (!clicked) {
+                    clicked = refreshedContactNode.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
+                    android.util.Log.d("WireAuto", "Method 5 - Long click: $clicked")
+                }
+                
+                // Method 6: Try clicking using bounds/coordinates if available
+                if (!clicked && refreshedContactNode.boundsInParent.width() > 0 && refreshedContactNode.boundsInParent.height() > 0) {
+                    val bounds = android.graphics.Rect()
+                    refreshedContactNode.getBoundsInScreen(bounds)
+                    if (bounds.width() > 0 && bounds.height() > 0) {
+                        // Try to find a clickable node at these coordinates
+                        val clickableAtBounds = findClickableNodeAtBounds(currentRoot, bounds)
+                        if (clickableAtBounds != null) {
+                            clicked = clickableAtBounds.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                            android.util.Log.d("WireAuto", "Method 6 - Clicked at bounds: $clicked")
+                        }
+                    }
+                }
+                
+                // Method 7: Try to find contact by searching all clickable nodes with matching text
+                if (!clicked) {
+                    val allClickableNodes = mutableListOf<AccessibilityNodeInfo>()
+                    findAllClickableNodes(currentRoot, allClickableNodes)
+                    
+                    for (node in allClickableNodes) {
+                        val nodeText = node.text?.toString()?.trim() ?: ""
+                        val nodeContentDesc = node.contentDescription?.toString()?.trim() ?: ""
+                        
+                        if (nodeText.equals(contactName, ignoreCase = true) ||
+                            nodeText.equals(cleanContactName, ignoreCase = true) ||
+                            nodeContentDesc.equals(contactName, ignoreCase = true) ||
+                            nodeContentDesc.equals(cleanContactName, ignoreCase = true)) {
+                            clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                            android.util.Log.d("WireAuto", "Method 7 - Clicked matching clickable node: $clicked")
+                            if (clicked) break
+                        }
                     }
                 }
                 
                 if (!clicked) {
-                    android.util.Log.w("WireAuto", "Could not click contact: $contactName")
+                    android.util.Log.w("WireAuto", "All click methods failed for contact: $contactName")
                     contactResults.add(com.wireautomessenger.model.ContactResult(
                         name = contactName,
                         status = com.wireautomessenger.model.ContactStatus.FAILED,
-                        errorMessage = "Could not click contact",
+                        errorMessage = "Could not click contact after trying 7 methods",
                         position = index + 1
                     ))
                     sendContactUpdate(contactName, "failed", index + 1, "Could not click contact")
