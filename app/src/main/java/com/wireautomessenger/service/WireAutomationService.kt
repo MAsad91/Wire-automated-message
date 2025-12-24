@@ -243,7 +243,7 @@ class WireAutomationService : AccessibilityService() {
         // Try to navigate to conversations/contacts list
         // Wire typically shows conversations by default, but we need to ensure we're on the right screen
         navigateToConversationsList(rootNode)
-        delay(3000) // Wait for navigation
+        delay(4000) // Wait longer for navigation to complete
 
         // Refresh root after navigation
         rootNode = rootInActiveWindow
@@ -397,16 +397,51 @@ class WireAutomationService : AccessibilityService() {
                     }
                 }
                 
-                // If we're in a conversation (have message input), go back to list first
+                // Ensure we're on the contacts list, not in a conversation
+                // Check if we're in a conversation by looking for message input
                 val messageInputExists = findMessageInput(currentRoot) != null
                 if (messageInputExists) {
-                    android.util.Log.d("WireAuto", "In conversation, going back to list first...")
+                    android.util.Log.d("WireAuto", "Currently in a conversation, going back to contacts list...")
                     performGlobalAction(GLOBAL_ACTION_BACK)
-                    delay(2000)
+                    delay(3000) // Wait longer for navigation
                     currentRoot = rootInActiveWindow
+                    
+                    // Verify we're still in Wire app and on the list
                     if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
-                        android.util.Log.w("WireAuto", "Lost access after going back, skipping contact")
-                        continue
+                        android.util.Log.w("WireAuto", "Lost access to Wire after going back, trying to relaunch...")
+                        // Try to relaunch Wire
+                        try {
+                            val wireIntent = packageManager.getLaunchIntentForPackage(WIRE_PACKAGE)
+                            if (wireIntent != null) {
+                                wireIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                startActivity(wireIntent)
+                                delay(4000)
+                                currentRoot = rootInActiveWindow
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("WireAuto", "Failed to relaunch Wire", e)
+                        }
+                        
+                        if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
+                            android.util.Log.w("WireAuto", "Still not in Wire app, marking contact as failed")
+                            contactResults.add(com.wireautomessenger.model.ContactResult(
+                                name = contactName,
+                                status = com.wireautomessenger.model.ContactStatus.FAILED,
+                                errorMessage = "Lost access to Wire app",
+                                position = index + 1
+                            ))
+                            sendContactUpdate(contactName, "failed", index + 1, "Lost access to Wire app")
+                            continue
+                        }
+                    }
+                    
+                    // Double-check we're not still in a conversation
+                    val stillInConversation = findMessageInput(currentRoot) != null
+                    if (stillInConversation) {
+                        android.util.Log.w("WireAuto", "Still in conversation after going back, trying once more...")
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        delay(2000)
+                        currentRoot = rootInActiveWindow
                     }
                 }
                 
@@ -598,12 +633,35 @@ class WireAutomationService : AccessibilityService() {
                 sendProgressBroadcast("Sent to $contactsSent/$totalContacts contacts...", contactsSent)
 
                 // Go back to contacts list before processing next contact
-                android.util.Log.d("WireAuto", "Going back to contacts list...")
-                performGlobalAction(GLOBAL_ACTION_BACK)
-                delay(2000) // Wait to ensure we're back on the list
+                // But first verify we're still in Wire app
+                currentRoot = rootInActiveWindow
+                if (currentRoot != null && currentRoot.packageName == WIRE_PACKAGE) {
+                    // Check if we're still in conversation (message input exists)
+                    val stillInConversation = findMessageInput(currentRoot) != null
+                    if (stillInConversation) {
+                        android.util.Log.d("WireAuto", "Still in conversation, going back to contacts list...")
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        delay(3000) // Wait longer to ensure we're back on the list
+                        
+                        // Verify we're back on the list
+                        currentRoot = rootInActiveWindow
+                        if (currentRoot != null && currentRoot.packageName == WIRE_PACKAGE) {
+                            val stillInConv = findMessageInput(currentRoot) != null
+                            if (stillInConv) {
+                                android.util.Log.w("WireAuto", "Still in conversation after back, trying once more...")
+                                performGlobalAction(GLOBAL_ACTION_BACK)
+                                delay(2000)
+                            }
+                        }
+                    } else {
+                        android.util.Log.d("WireAuto", "Already on contacts list, no need to go back")
+                    }
+                } else {
+                    android.util.Log.w("WireAuto", "Not in Wire app after sending, may have navigated away")
+                }
                 
                 // Small delay before processing next contact
-                delay(500)
+                delay(1000)
 
             } catch (e: Exception) {
                 android.util.Log.e("WireAuto", "Error processing contact $contactsProcessed: ${e.message}", e)
