@@ -507,7 +507,7 @@ class WireAutomationService : AccessibilityService() {
                 }
                 
                 // Method 6: Try clicking using bounds/coordinates if available
-                if (!clicked && refreshedContactNode.boundsInParent.width() > 0 && refreshedContactNode.boundsInParent.height() > 0) {
+                if (!clicked) {
                     val bounds = android.graphics.Rect()
                     refreshedContactNode.getBoundsInScreen(bounds)
                     if (bounds.width() > 0 && bounds.height() > 0) {
