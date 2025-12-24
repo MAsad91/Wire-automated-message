@@ -1463,7 +1463,16 @@ class WireAutomationService : AccessibilityService() {
         }
         
         val rootText = root.text?.toString()?.trim() ?: ""
-        if (rootText.equals(contactName, ignoreCase = true)) {
+        val rootContentDesc = root.contentDescription?.toString()?.trim() ?: ""
+        val cleanContactName = contactName.removePrefix("You: ").trim()
+        
+        // Check if root matches (exact or contains)
+        if (rootText.equals(contactName, ignoreCase = true) ||
+            rootText.equals(cleanContactName, ignoreCase = true) ||
+            rootText.contains(cleanContactName, ignoreCase = true) ||
+            rootContentDesc.equals(contactName, ignoreCase = true) ||
+            rootContentDesc.equals(cleanContactName, ignoreCase = true) ||
+            rootContentDesc.contains(cleanContactName, ignoreCase = true)) {
             // Check if it's clickable or has clickable parent (likely a contact)
             if (root.isClickable || findClickableNode(root) != null) {
                 return root
@@ -1475,6 +1484,38 @@ class WireAutomationService : AccessibilityService() {
             val child = root.getChild(i)
             if (child != null) {
                 val found = findContactNodeByText(child, contactName)
+                if (found != null) return found
+            }
+        }
+        
+        return null
+    }
+    
+    private fun findAllClickableNodes(root: AccessibilityNodeInfo, result: MutableList<AccessibilityNodeInfo>) {
+        if (root.isClickable && root.packageName == WIRE_PACKAGE) {
+            result.add(root)
+        }
+        
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i)
+            if (child != null) {
+                findAllClickableNodes(child, result)
+            }
+        }
+    }
+    
+    private fun findClickableNodeAtBounds(root: AccessibilityNodeInfo, bounds: android.graphics.Rect): AccessibilityNodeInfo? {
+        val rootBounds = android.graphics.Rect()
+        root.getBoundsInScreen(rootBounds)
+        
+        if (rootBounds.intersect(bounds) && root.isClickable && root.packageName == WIRE_PACKAGE) {
+            return root
+        }
+        
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i)
+            if (child != null) {
+                val found = findClickableNodeAtBounds(child, bounds)
                 if (found != null) return found
             }
         }
