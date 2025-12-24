@@ -351,29 +351,17 @@ class WireAutomationService : AccessibilityService() {
                 updateNotification("Sending to contact $contactsProcessed/$totalContacts: $contactName...")
                 sendProgressBroadcast("Sending to contact $contactsProcessed/$totalContacts: $contactName...", contactsSent)
                 
-                // Ensure we're on the conversations list before clicking
+                // Ensure we're in Wire app
                 var currentRoot = rootInActiveWindow
                 if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
-                    android.util.Log.w("WireAuto", "Not in Wire app, trying to navigate back to list...")
-                    // Try to open Wire again
-                    val wireIntent = packageManager.getLaunchIntentForPackage(WIRE_PACKAGE)
-                    if (wireIntent != null) {
-                        wireIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        startActivity(wireIntent)
-                        delay(3000)
-                        currentRoot = rootInActiveWindow
-                    }
-                    if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
-                        android.util.Log.w("WireAuto", "Still not in Wire app, skipping contact")
-                        continue
-                    }
+                    android.util.Log.w("WireAuto", "Not in Wire app, skipping contact")
+                    continue
                 }
                 
-                // Verify we're on the conversations list (not in a conversation)
-                // If we're in a conversation, go back first
-                val isInConversation = findMessageInput(currentRoot) != null
-                if (isInConversation) {
-                    android.util.Log.d("WireAuto", "Currently in conversation, going back to list...")
+                // If we're in a conversation (have message input), go back to list first
+                val messageInputExists = findMessageInput(currentRoot) != null
+                if (messageInputExists) {
+                    android.util.Log.d("WireAuto", "In conversation, going back to list first...")
                     performGlobalAction(GLOBAL_ACTION_BACK)
                     delay(2000)
                     currentRoot = rootInActiveWindow
@@ -383,17 +371,26 @@ class WireAutomationService : AccessibilityService() {
                     }
                 }
                 
+                // Refresh contact node from current root (contactNode might be stale)
+                // Try to find the contact by its text in the current root
+                val refreshedContactNode = findContactNodeByText(currentRoot, contactName)
+                val nodeToClick = refreshedContactNode ?: contactNode
+                
+                android.util.Log.d("WireAuto", "Attempting to click contact: $contactName")
+                
                 // Click on contact - try multiple methods
                 var clicked = false
-                if (contactNode.isClickable) {
-                    contactNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    clicked = true
-                } else {
+                if (nodeToClick.isClickable) {
+                    clicked = nodeToClick.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    android.util.Log.d("WireAuto", "Clicked contact directly: $clicked")
+                }
+                
+                if (!clicked) {
                     // Try to find clickable parent or child
-                    var nodeToClick = findClickableNode(contactNode)
-                    if (nodeToClick != null) {
-                        nodeToClick.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                        clicked = true
+                    val clickableNode = findClickableNode(nodeToClick)
+                    if (clickableNode != null) {
+                        clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        android.util.Log.d("WireAuto", "Clicked contact via clickable node: $clicked")
                     }
                 }
                 
@@ -402,7 +399,7 @@ class WireAutomationService : AccessibilityService() {
                     continue
                 }
                 
-                delay(2000) // Wait for conversation to open
+                delay(2500) // Wait for conversation to open
 
                 // Verify we're in conversation view
                 currentRoot = rootInActiveWindow
@@ -518,43 +515,20 @@ class WireAutomationService : AccessibilityService() {
                 updateNotification("Sent to $contactsSent/$totalContacts contacts...")
                 sendProgressBroadcast("Sent to $contactsSent/$totalContacts contacts...", contactsSent)
 
-                // CRITICAL: Go back to contacts list before processing next contact
+                // Go back to contacts list before processing next contact
                 android.util.Log.d("WireAuto", "Going back to contacts list...")
                 performGlobalAction(GLOBAL_ACTION_BACK)
-                delay(2000) // Wait longer to ensure we're back on the list
-                
-                // Verify we're back on the list (not in conversation)
-                currentRoot = rootInActiveWindow
-                if (currentRoot != null && currentRoot.packageName == WIRE_PACKAGE) {
-                    val stillInConversation = findMessageInput(currentRoot) != null
-                    if (stillInConversation) {
-                        android.util.Log.w("WireAuto", "Still in conversation after back, trying back again...")
-                        performGlobalAction(GLOBAL_ACTION_BACK)
-                        delay(2000)
-                    }
-                }
+                delay(2000) // Wait to ensure we're back on the list
                 
                 // Small delay before processing next contact
-                delay(1000)
+                delay(500)
 
             } catch (e: Exception) {
                 android.util.Log.e("WireAuto", "Error processing contact $contactsProcessed: ${e.message}", e)
-                // CRITICAL: Always try to go back to list, even on error
+                // Try to go back to list on error
                 try {
-                    android.util.Log.d("WireAuto", "Error occurred, going back to list...")
                     performGlobalAction(GLOBAL_ACTION_BACK)
-                    delay(2000)
-                    
-                    // Verify we're back on the list
-                    val currentRoot = rootInActiveWindow
-                    if (currentRoot != null && currentRoot.packageName == WIRE_PACKAGE) {
-                        val stillInConversation = findMessageInput(currentRoot) != null
-                        if (stillInConversation) {
-                            android.util.Log.w("WireAuto", "Still in conversation after error, trying back again...")
-                            performGlobalAction(GLOBAL_ACTION_BACK)
-                            delay(2000)
-                        }
-                    }
+                    delay(1500)
                 } catch (e2: Exception) {
                     android.util.Log.e("WireAuto", "Error going back to list: ${e2.message}")
                 }
@@ -1099,11 +1073,53 @@ class WireAutomationService : AccessibilityService() {
     }
 
     private fun findMessageInput(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        // Look for EditText or text input field
-        return findNodeByClassName(root, "android.widget.EditText")
-            ?: findNodeByClassName(root, "androidx.appcompat.widget.AppCompatEditText")
-            ?: findNodeByContentDescription(root, "Message")
-            ?: findNodeByContentDescription(root, "Type a message")
+        // Look for EditText or text input field, but exclude search boxes
+        // Search boxes typically have "Search" in their content description
+        val allEditTexts = mutableListOf<AccessibilityNodeInfo>()
+        findAllNodesByClassName(root, "android.widget.EditText", allEditTexts)
+        findAllNodesByClassName(root, "androidx.appcompat.widget.AppCompatEditText", allEditTexts)
+        
+        for (editText in allEditTexts) {
+            val contentDesc = editText.contentDescription?.toString()?.lowercase() ?: ""
+            val hint = editText.hintText?.toString()?.lowercase() ?: ""
+            
+            // Exclude search boxes
+            if (contentDesc.contains("search") || hint.contains("search")) {
+                continue
+            }
+            
+            // Prefer message input fields
+            if (contentDesc.contains("message") || 
+                contentDesc.contains("type a message") ||
+                hint.contains("message") ||
+                hint.contains("type")) {
+                return editText
+            }
+        }
+        
+        // If no specific message input found, return first non-search EditText
+        for (editText in allEditTexts) {
+            val contentDesc = editText.contentDescription?.toString()?.lowercase() ?: ""
+            val hint = editText.hintText?.toString()?.lowercase() ?: ""
+            if (!contentDesc.contains("search") && !hint.contains("search")) {
+                return editText
+            }
+        }
+        
+        return null
+    }
+    
+    private fun findAllNodesByClassName(root: AccessibilityNodeInfo, className: String, result: MutableList<AccessibilityNodeInfo>) {
+        if (root.className?.toString() == className) {
+            result.add(root)
+        }
+        
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i)
+            if (child != null) {
+                findAllNodesByClassName(child, className, result)
+            }
+        }
     }
 
     private fun findSendButton(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -1215,6 +1231,33 @@ class WireAutomationService : AccessibilityService() {
                 if (found != null) return found
             }
         }
+        return null
+    }
+    
+    private fun findContactNodeByText(root: AccessibilityNodeInfo, contactName: String): AccessibilityNodeInfo? {
+        // Try to find a contact node that matches the contact name
+        // This helps refresh stale contact nodes
+        if (root.packageName != WIRE_PACKAGE) {
+            return null
+        }
+        
+        val rootText = root.text?.toString()?.trim() ?: ""
+        if (rootText.equals(contactName, ignoreCase = true)) {
+            // Check if it's clickable or has clickable parent (likely a contact)
+            if (root.isClickable || findClickableNode(root) != null) {
+                return root
+            }
+        }
+        
+        // Search children
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i)
+            if (child != null) {
+                val found = findContactNodeByText(child, contactName)
+                if (found != null) return found
+            }
+        }
+        
         return null
     }
 
