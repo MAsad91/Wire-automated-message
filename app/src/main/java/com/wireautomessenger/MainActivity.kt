@@ -27,8 +27,12 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.switchmaterial.SwitchMaterial
 import com.google.android.material.textfield.TextInputEditText
+import com.wireautomessenger.api.WireApiManager
 import com.wireautomessenger.service.WireAutomationService
 import com.wireautomessenger.work.MessageSendingWorker
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
@@ -403,17 +407,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun sendMessagesNow() {
-        if (!isAccessibilityServiceEnabled()) {
-            Toast.makeText(this, getString(R.string.accessibility_not_enabled), Toast.LENGTH_LONG).show()
-            return
-        }
-        
-        // Check if Wire app is installed
-        if (!isWireAppInstalled()) {
-            showWireNotInstalledDialog()
-            return
-        }
-
         val message = etMessage.text?.toString()?.trim() ?: ""
         if (message.isEmpty()) {
             etMessage.error = getString(R.string.message_empty)
@@ -422,7 +415,169 @@ class MainActivity : AppCompatActivity() {
         }
 
         saveMessage()
-        startMessageSending(message)
+        
+        // Check if API credentials are configured
+        val appId = prefs.getString("wire_app_id", "")?.trim()
+        val apiToken = prefs.getString("wire_api_token", "")?.trim()
+        
+        if (!appId.isNullOrEmpty() && !apiToken.isNullOrEmpty()) {
+            // Use API mode
+            sendMessagesViaApi(appId, apiToken, message)
+        } else {
+            // Use Accessibility Service mode (fallback)
+            if (!isAccessibilityServiceEnabled()) {
+                showApiConfigurationDialog()
+                return
+            }
+            
+            // Check if Wire app is installed
+            if (!isWireAppInstalled()) {
+                showWireNotInstalledDialog()
+                return
+            }
+            
+            startMessageSending(message)
+        }
+    }
+    
+    private fun sendMessagesViaApi(appId: String, apiToken: String, message: String) {
+        llProgress.visibility = View.VISIBLE
+        progressBar.visibility = View.VISIBLE
+        btnSendNow.isEnabled = false
+        switchSchedule.isEnabled = false
+        
+        tvStatus.text = "Connecting to Wire API..."
+        tvStatus.visibility = View.VISIBLE
+        
+        val apiManager = WireApiManager(this)
+        val scope = CoroutineScope(Dispatchers.Main)
+        
+        scope.launch {
+            try {
+                // Step 1: Get team members
+                runOnUiThread {
+                    tvStatus.text = "Getting team members..."
+                }
+                sendProgressBroadcast("Getting team members...", 0)
+                
+                val membersResult = apiManager.getTeamMembers(appId, apiToken)
+                
+                if (membersResult.isFailure) {
+                    val error = membersResult.exceptionOrNull()?.message ?: "Unknown error"
+                    onSendingError("Failed to get team members: $error")
+                    return@launch
+                }
+                
+                val userIds = membersResult.getOrNull() ?: emptyList()
+                
+                if (userIds.isEmpty()) {
+                    onSendingError("No team members found. Please ensure your Wire team has members.")
+                    return@launch
+                }
+                
+                // Step 2: Send broadcast message
+                runOnUiThread {
+                    tvStatus.text = "Sending messages to ${userIds.size} team members..."
+                }
+                sendProgressBroadcast("Sending messages to ${userIds.size} team members...", 0)
+                
+                val broadcastResult = apiManager.sendBroadcastMessage(
+                    appId = appId,
+                    apiToken = apiToken,
+                    userIds = userIds,
+                    message = message,
+                    onProgress = { current, total ->
+                        runOnUiThread {
+                            tvStatus.text = "Sending to $current/$total team members..."
+                            sendProgressBroadcast("Sending to $current/$total team members...", current - 1)
+                        }
+                    }
+                )
+                
+                if (broadcastResult.isSuccess) {
+                    val result = broadcastResult.getOrNull()!!
+                    onSendingCompleted(result.success, result.total)
+                } else {
+                    val error = broadcastResult.exceptionOrNull()?.message ?: "Unknown error"
+                    onSendingError("Failed to send messages: $error")
+                }
+                
+            } catch (e: Exception) {
+                android.util.Log.e("WireAPI", "Error in API send", e)
+                onSendingError("Error: ${e.message ?: "Unknown error"}")
+            }
+        }
+    }
+    
+    private fun showApiConfigurationDialog() {
+        MaterialAlertDialogBuilder(this, R.style.Theme_WireAutoMessenger_Dialog)
+            .setTitle("Wire API Configuration")
+            .setMessage("You can use Wire API (Team accounts) or Accessibility Service (Personal accounts).\n\n" +
+                    "For Team accounts:\n" +
+                    "1. Get App ID and Token from Wire Team Settings → Apps\n" +
+                    "2. Configure them in Settings\n\n" +
+                    "For Personal accounts:\n" +
+                    "Enable Accessibility Service to continue.")
+            .setPositiveButton("Configure API") { _, _ ->
+                showApiSettingsDialog()
+            }
+            .setNegativeButton("Use Accessibility") { _, _ ->
+                if (!isAccessibilityServiceEnabled()) {
+                    showAccessibilityPermissionDialog()
+                } else {
+                    sendMessagesNow()
+                }
+            }
+            .setNeutralButton("Cancel", null)
+            .show()
+    }
+    
+    private fun showApiSettingsDialog() {
+        val dialogView = layoutInflater.inflate(android.R.layout.simple_list_item_2, null)
+        // Create a custom dialog with input fields
+        val inputLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 16, 32, 16)
+        }
+        
+        val etAppId = TextInputEditText(this).apply {
+            hint = "App ID"
+            setText(prefs.getString("wire_app_id", ""))
+        }
+        
+        val etApiToken = TextInputEditText(this).apply {
+            hint = "API Token"
+            setText(prefs.getString("wire_api_token", ""))
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        
+        inputLayout.addView(etAppId)
+        inputLayout.addView(etApiToken)
+        
+        MaterialAlertDialogBuilder(this, R.style.Theme_WireAutoMessenger_Dialog)
+            .setTitle("Wire API Configuration")
+            .setMessage("Enter your Wire App credentials:\n\n" +
+                    "1. Go to Wire Team Settings → Apps\n" +
+                    "2. Create a new app or use existing\n" +
+                    "3. Copy App ID and API Token\n" +
+                    "4. Paste them below")
+            .setView(inputLayout)
+            .setPositiveButton("Save") { _, _ ->
+                val appId = etAppId.text?.toString()?.trim() ?: ""
+                val apiToken = etApiToken.text?.toString()?.trim() ?: ""
+                
+                if (appId.isEmpty() || apiToken.isEmpty()) {
+                    Toast.makeText(this, "Please enter both App ID and API Token", Toast.LENGTH_SHORT).show()
+                } else {
+                    prefs.edit()
+                        .putString("wire_app_id", appId)
+                        .putString("wire_api_token", apiToken)
+                        .apply()
+                    Toast.makeText(this, "API credentials saved!", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
     
     private fun isWireAppInstalled(): Boolean {
@@ -592,7 +747,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
     
-    private fun onSendingCompleted(contactsSent: Int) {
+    private fun onSendingCompleted(contactsSent: Int, totalContacts: Int = contactsSent) {
         runOnUiThread {
             // Save completion status
             prefs.edit()
@@ -602,11 +757,21 @@ class MainActivity : AppCompatActivity() {
             
             // Update UI
             progressBar.visibility = View.GONE
-            tvStatus.text = "✓ Completed! Sent to $contactsSent contacts"
+            val statusText = if (totalContacts > contactsSent) {
+                "✓ Completed! Sent to $contactsSent out of $totalContacts contacts"
+            } else {
+                "✓ Completed! Sent to $contactsSent contacts"
+            }
+            tvStatus.text = statusText
             tvStatus.setTextColor(getColor(R.color.on_success))
             
             // Show success message
-            Toast.makeText(this, "Messages sent to $contactsSent contacts successfully!", Toast.LENGTH_LONG).show()
+            val toastMessage = if (totalContacts > contactsSent) {
+                "Messages sent to $contactsSent out of $totalContacts contacts successfully!"
+            } else {
+                "Messages sent to $contactsSent contacts successfully!"
+            }
+            Toast.makeText(this, toastMessage, Toast.LENGTH_LONG).show()
             
             // Reset UI after 3 seconds
             btnSendNow.postDelayed({
@@ -753,6 +918,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun sendProgressBroadcast(text: String, contactsSent: Int = 0) {
+        try {
+            val intent = Intent(WireAutomationService.ACTION_PROGRESS_UPDATE).apply {
+                putExtra(WireAutomationService.EXTRA_PROGRESS_TEXT, text)
+                putExtra(WireAutomationService.EXTRA_CONTACTS_SENT, contactsSent)
+            }
+            LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Error sending progress broadcast", e)
+        }
+    }
+    
     private fun isAccessibilityServiceEnabled(): Boolean {
         val accessibilityManager = getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
         val enabledServices = accessibilityManager.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
