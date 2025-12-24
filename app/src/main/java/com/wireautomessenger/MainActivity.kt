@@ -749,12 +749,48 @@ class MainActivity : AppCompatActivity() {
         switchSchedule.isEnabled = false
     }
     
+    private val contactUpdates = mutableListOf<com.wireautomessenger.model.ContactResult>()
+    
     private fun updateProgress(progressText: String, contactsSent: Int) {
         runOnUiThread {
             tvStatus.text = progressText
             if (contactsSent > 0) {
                 tvStatus.text = "$progressText ($contactsSent sent)"
             }
+        }
+    }
+    
+    private fun onContactUpdate(contactName: String, status: String, position: Int, errorMessage: String?) {
+        runOnUiThread {
+            val contactStatus = when (status) {
+                "sent" -> com.wireautomessenger.model.ContactStatus.SENT
+                "failed" -> com.wireautomessenger.model.ContactStatus.FAILED
+                "skipped" -> com.wireautomessenger.model.ContactStatus.SKIPPED
+                else -> com.wireautomessenger.model.ContactStatus.FAILED
+            }
+            
+            val result = com.wireautomessenger.model.ContactResult(
+                name = contactName,
+                status = contactStatus,
+                errorMessage = errorMessage,
+                position = position
+            )
+            
+            // Update or add contact result
+            val existingIndex = contactUpdates.indexOfFirst { it.name == contactName && it.position == position }
+            if (existingIndex >= 0) {
+                contactUpdates[existingIndex] = result
+            } else {
+                contactUpdates.add(result)
+            }
+            
+            // Update status text with latest contact
+            val statusEmoji = when (contactStatus) {
+                com.wireautomessenger.model.ContactStatus.SENT -> "✓"
+                com.wireautomessenger.model.ContactStatus.FAILED -> "✗"
+                com.wireautomessenger.model.ContactStatus.SKIPPED -> "⊘"
+            }
+            tvStatus.text = "$statusEmoji $contactName ($status)"
         }
     }
     
@@ -817,10 +853,9 @@ class MainActivity : AppCompatActivity() {
         val resultsJson = prefs.getString("last_contact_results", null)
         val results = if (resultsJson != null) {
             try {
-                com.google.gson.Gson().fromJson(
-                    resultsJson,
-                    Array<com.wireautomessenger.model.ContactResult>::class.java
-                ).toList().sortedBy { it.position }
+                val type = object : com.google.gson.reflect.TypeToken<List<com.wireautomessenger.model.ContactResult>>() {}.type
+                val parsedResults: List<com.wireautomessenger.model.ContactResult>? = com.google.gson.Gson().fromJson(resultsJson, type)
+                parsedResults?.sortedBy { it.position } ?: contactUpdates.sortedBy { it.position }
             } catch (e: Exception) {
                 contactUpdates.sortedBy { it.position }
             }

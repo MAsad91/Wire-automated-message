@@ -37,9 +37,6 @@ class WireApiManager(private val context: Context) {
     }
     
     private val client = OkHttpClient.Builder()
-        .addInterceptor(HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BODY
-        })
         .build()
     
     private val gson = Gson()
@@ -87,18 +84,19 @@ class WireApiManager(private val context: Context) {
         userIds.forEachIndexed { index, userId ->
             onProgress(index + 1, userIds.size)
             
-            when (val result = sendMessageToUser(appId, apiToken, userId, message)) {
-                is Result.Success -> {
+            val result = sendMessageToUser(appId, apiToken, userId, message)
+            result.fold(
+                onSuccess = { messageId ->
                     successCount++
                     Log.d(TAG, "Sent to user ${index + 1}/${userIds.size}: $userId")
-                }
-                is Result.Failure -> {
+                },
+                onFailure = { exception ->
                     failureCount++
-                    val error = "User $userId: ${result.exception.message}"
+                    val error = "User $userId: ${exception.message}"
                     errors.add(error)
-                    Log.w(TAG, "Failed to send to user $userId: ${result.exception.message}")
+                    Log.w(TAG, "Failed to send to user $userId: ${exception.message}")
                 }
-            }
+            )
             
             // Small delay to avoid rate limiting
             kotlinx.coroutines.delay(500)
@@ -147,7 +145,7 @@ class WireApiManager(private val context: Context) {
             
             if (response.isSuccessful) {
                 val responseBody = response.body?.string()
-                val conversation = gson.fromJson(responseBody, ConversationResponse::class.java)
+                val conversation = gson.fromJson(responseBody ?: "", ConversationResponse::class.java)
                 conversation.id
             } else {
                 Log.e(TAG, "Failed to create conversation: ${response.code} - ${response.message}")
@@ -188,7 +186,7 @@ class WireApiManager(private val context: Context) {
             
             if (response.isSuccessful) {
                 val responseBody = response.body?.string()
-                val messageResponse = gson.fromJson(responseBody, MessageResponse::class.java)
+                val messageResponse = gson.fromJson(responseBody ?: "", MessageResponse::class.java)
                 messageResponse.id
             } else {
                 val errorBody = response.body?.string()
@@ -219,7 +217,7 @@ class WireApiManager(private val context: Context) {
             
             if (response.isSuccessful) {
                 val responseBody = response.body?.string()
-                val usersResponse = gson.fromJson(responseBody, UsersResponse::class.java)
+                val usersResponse = gson.fromJson(responseBody ?: "", UsersResponse::class.java)
                 val userIds = usersResponse.users?.map { it.id } ?: emptyList()
                 Result.success(userIds)
             } else {
