@@ -642,7 +642,7 @@ class WireAutomationService : AccessibilityService() {
                 delay(3000) // Wait for conversation to open
 
                 // Verify we're in conversation view - try multiple times
-                var currentRoot = rootInActiveWindow
+                currentRoot = rootInActiveWindow
                 var attempts = 0
                 while ((currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) && attempts < 3) {
                     android.util.Log.d("WireAuto", "Waiting for Wire app access (attempt ${attempts + 1})...")
