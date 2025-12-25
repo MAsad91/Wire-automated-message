@@ -899,7 +899,7 @@ class WireAutomationService : AccessibilityService() {
                         sendButton = findSendButtonNearInput(currentRoot, messageInput)
                         if (sendButton != null) {
                             sendButton = getClickableParent(sendButton) // Ensure we get clickable parent
-                            android.util.Log.i("WireAuto", "Send button found near input: className=${sendButton.className}")
+                            android.util.Log.i("WireAuto", "Send button found near input: className=${sendButton?.className}")
                         }
                     }
                     
