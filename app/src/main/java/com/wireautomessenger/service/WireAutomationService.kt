@@ -1961,6 +1961,71 @@ class WireAutomationService : AccessibilityService() {
         return false
     }
     
+    private fun isActualConversationRow(node: AccessibilityNodeInfo): Boolean {
+        // Filter out UI elements that are NOT conversation rows:
+        // - Search bars (contain "search" in text/content description)
+        // - Section headers (like "CONVERSATIONS")
+        // - FAB buttons (floating action buttons)
+        // - Toolbars, action bars
+        // - Empty or very small items
+        
+        val className = node.className?.toString() ?: ""
+        val text = node.text?.toString()?.trim() ?: ""
+        val contentDesc = node.contentDescription?.toString()?.trim() ?: ""
+        val lowerText = text.lowercase()
+        val lowerDesc = contentDesc.lowercase()
+        
+        // Exclude search bars
+        if (lowerText.contains("search") || lowerDesc.contains("search") ||
+            className.contains("SearchView", ignoreCase = true) ||
+            className.contains("EditText", ignoreCase = true)) {
+            return false
+        }
+        
+        // Exclude section headers
+        if (text == "CONVERSATIONS" || text == "CONVERSATION" || 
+            text == "CHATS" || text == "MESSAGES" ||
+            (text.isNotEmpty() && text.all { it.isLetter() && it.isUpperCase() && text.length < 15 })) {
+            return false
+        }
+        
+        // Exclude FAB buttons
+        if (className.contains("FloatingActionButton", ignoreCase = true) ||
+            lowerText == "new" || lowerDesc == "new" ||
+            (text == "New" && className.contains("Button", ignoreCase = true))) {
+            return false
+        }
+        
+        // Exclude toolbars and action bars
+        if (className.contains("Toolbar", ignoreCase = true) ||
+            className.contains("ActionBar", ignoreCase = true) ||
+            className.contains("AppBar", ignoreCase = true)) {
+            return false
+        }
+        
+        // Exclude items that are too small (likely not conversation rows)
+        val bounds = android.graphics.Rect()
+        node.getBoundsInScreen(bounds)
+        if (bounds.height() < 50) { // Conversation rows are typically taller than 50px
+            return false
+        }
+        
+        // A conversation row should:
+        // - Have text content (contact name or message preview)
+        // - Be clickable or have clickable parent
+        // - Have multiple children (avatar, name, message, etc.)
+        val hasText = text.isNotEmpty() || contentDesc.isNotEmpty()
+        val hasMultipleChildren = node.childCount >= 2
+        val isClickable = node.isClickable || findClickableNode(node) != null
+        
+        // Must be in Wire package
+        if (node.packageName != WIRE_PACKAGE) {
+            return false
+        }
+        
+        return hasText && hasMultipleChildren && isClickable
+    }
+    
     private fun findClickableContainersInRecyclerView(root: AccessibilityNodeInfo, result: MutableList<AccessibilityNodeInfo>) {
         // Find all clickable containers that look like conversation rows
         val className = root.className?.toString() ?: ""
@@ -1972,9 +2037,11 @@ class WireAutomationService : AccessibilityService() {
                          className.contains("CardView", ignoreCase = true)
         
         if (isContainer && root.childCount >= 2 && hasTextContent(root)) {
-            // This looks like a conversation row
-            if (root.isClickable || findClickableNode(root) != null) {
-                result.add(root)
+            // This looks like a conversation row - check if it's actually a conversation row
+            if (isActualConversationRow(root)) {
+                if (root.isClickable || findClickableNode(root) != null) {
+                    result.add(root)
+                }
             }
         }
         
