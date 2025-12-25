@@ -324,14 +324,9 @@ class WireAutomationService : AccessibilityService() {
             }
         }
         
-        val totalContacts = contactItems.size
-        android.util.Log.i("WireAuto", "Starting to send messages to $totalContacts contacts")
-        updateNotification("Found $totalContacts contacts. Sending messages...")
-        sendProgressBroadcast("Found $totalContacts contacts. Sending messages...", 0)
-
         // NEW APPROACH: Find RecyclerView and click row items directly by position
         // This is more reliable than trying to match by text
-        val recyclerView = findRecyclerView(currentRoot)
+        val recyclerView = findRecyclerView(rootNode)
         val rowItems = if (recyclerView != null) {
             android.util.Log.d("WireAuto", "Found RecyclerView, getting direct children (row items)...")
             val items = mutableListOf<AccessibilityNodeInfo>()
@@ -349,6 +344,9 @@ class WireAutomationService : AccessibilityService() {
         }
         
         val totalContacts = rowItems.size
+        android.util.Log.i("WireAuto", "Starting to send messages to $totalContacts contacts")
+        updateNotification("Found $totalContacts contacts. Sending messages...")
+        sendProgressBroadcast("Found $totalContacts contacts. Sending messages...", 0)
         android.util.Log.i("WireAuto", "=== Starting to process $totalContacts contacts from top to bottom ===")
         
         val processedContactIndices = mutableSetOf<Int>() // Track processed contacts by index to avoid duplicates
