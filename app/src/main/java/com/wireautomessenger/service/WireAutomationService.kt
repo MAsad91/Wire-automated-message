@@ -324,19 +324,52 @@ class WireAutomationService : AccessibilityService() {
             }
         }
         
-        // NEW APPROACH: Find RecyclerView and click row items directly by position
-        // This is more reliable than trying to match by text
+        // NEW APPROACH: Find RecyclerView and identify actual conversation row items
+        // Filter out UI elements like search bars, headers, FAB buttons
         val recyclerView = findRecyclerView(rootNode)
         val rowItems = if (recyclerView != null) {
-            android.util.Log.d("WireAuto", "Found RecyclerView, getting direct children (row items)...")
+            android.util.Log.d("WireAuto", "Found RecyclerView, identifying conversation row items...")
             val items = mutableListOf<AccessibilityNodeInfo>()
+            
+            // Get all children and filter for actual conversation rows
             for (i in 0 until recyclerView.childCount) {
                 val child = recyclerView.getChild(i)
                 if (child != null) {
-                    items.add(child)
-                    android.util.Log.d("WireAuto", "Row item $i: className=${child.className}, clickable=${child.isClickable}, childCount=${child.childCount}")
+                    // Check if this is a real conversation row (not search bar, header, FAB, etc.)
+                    if (isActualConversationRow(child)) {
+                        // Find the actual row container
+                        val rowContainer = findConversationRowContainer(child)
+                        if (rowContainer != null) {
+                            items.add(rowContainer)
+                            val contactName = extractContactNameFromRow(rowContainer) ?: "Contact ${items.size}"
+                            android.util.Log.d("WireAuto", "Conversation row ${items.size}: name='$contactName', className=${rowContainer.className}, clickable=${rowContainer.isClickable}")
+                        } else {
+                            // Fallback: use child if container not found
+                            items.add(child)
+                            android.util.Log.d("WireAuto", "Conversation row ${items.size} (no container): className=${child.className}, clickable=${child.isClickable}")
+                        }
+                    } else {
+                        android.util.Log.d("WireAuto", "Skipping non-conversation item $i: className=${child.className}")
+                    }
                 }
             }
+            
+            // If no items found via direct children, try finding all clickable containers
+            if (items.isEmpty()) {
+                android.util.Log.d("WireAuto", "No direct conversation rows found, searching for clickable containers...")
+                val allContainers = mutableListOf<AccessibilityNodeInfo>()
+                findClickableContainersInRecyclerView(recyclerView, allContainers)
+                
+                // Filter to only actual conversation rows
+                val filteredContainers = allContainers.filter { isActualConversationRow(it) }
+                items.addAll(filteredContainers.distinctBy { 
+                    val bounds = android.graphics.Rect()
+                    it.getBoundsInScreen(bounds)
+                    "${bounds.top}_${bounds.left}"
+                })
+                android.util.Log.d("WireAuto", "Found ${items.size} conversation containers after filtering")
+            }
+            
             items
         } else {
             android.util.Log.w("WireAuto", "No RecyclerView found, falling back to contact items list")
@@ -608,20 +641,43 @@ class WireAutomationService : AccessibilityService() {
                 
                 delay(3000) // Wait for conversation to open
 
-                // Verify we're in conversation view
-                currentRoot = rootInActiveWindow
+                // Verify we're in conversation view - try multiple times
+                var currentRoot = rootInActiveWindow
+                var attempts = 0
+                while ((currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) && attempts < 3) {
+                    android.util.Log.d("WireAuto", "Waiting for Wire app access (attempt ${attempts + 1})...")
+                    delay(1000)
+                    currentRoot = rootInActiveWindow
+                    attempts++
+                }
+                
                 if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
                     android.util.Log.w("WireAuto", "Not in Wire app after clicking contact: $contactName")
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                    delay(2000)
-                    contactResults.add(com.wireautomessenger.model.ContactResult(
-                        name = contactName,
-                        status = com.wireautomessenger.model.ContactStatus.FAILED,
-                        errorMessage = "Lost access after clicking contact",
-                        position = index + 1
-                    ))
-                    sendContactUpdate(contactName, "failed", index + 1, "Lost access after clicking")
-                    continue
+                    // Try to get back to Wire
+                    try {
+                        val wireIntent = packageManager.getLaunchIntentForPackage(WIRE_PACKAGE)
+                        if (wireIntent != null) {
+                            wireIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            startActivity(wireIntent)
+                            delay(3000)
+                            currentRoot = rootInActiveWindow
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("WireAuto", "Failed to relaunch Wire: ${e.message}")
+                    }
+                    
+                    if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        delay(2000)
+                        contactResults.add(com.wireautomessenger.model.ContactResult(
+                            name = contactName,
+                            status = com.wireautomessenger.model.ContactStatus.FAILED,
+                            errorMessage = "Lost access after clicking contact",
+                            position = index + 1
+                        ))
+                        sendContactUpdate(contactName, "failed", index + 1, "Lost access after clicking")
+                        continue
+                    }
                 }
 
                 // Verify we're actually in a conversation (message input should exist)
