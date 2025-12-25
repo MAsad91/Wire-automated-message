@@ -330,6 +330,7 @@ class WireAutomationService : AccessibilityService() {
         val rowItems = if (recyclerView != null) {
             android.util.Log.d("WireAuto", "Found RecyclerView, identifying conversation row items...")
             val items = mutableListOf<AccessibilityNodeInfo>()
+            val seenRowBounds = mutableSetOf<String>() // Track seen rows by position to avoid duplicates
             
             // Get all children and filter for actual conversation rows
             for (i in 0 until recyclerView.childCount) {
@@ -338,15 +339,23 @@ class WireAutomationService : AccessibilityService() {
                     // Check if this is a real conversation row (not search bar, header, FAB, etc.)
                     if (isActualConversationRow(child)) {
                         // Find the actual row container
-                        val rowContainer = findConversationRowContainer(child)
-                        if (rowContainer != null) {
+                        val rowContainer = findConversationRowContainer(child) ?: child
+                        
+                        // Get bounds to check for duplicates
+                        val bounds = android.graphics.Rect()
+                        rowContainer.getBoundsInScreen(bounds)
+                        
+                        // Use top position as key (rows are typically at different Y positions)
+                        // Allow some tolerance for slight variations
+                        val rowKey = "${bounds.top / 100}" // Group by 100px vertical position
+                        
+                        if (!seenRowBounds.contains(rowKey)) {
+                            seenRowBounds.add(rowKey)
                             items.add(rowContainer)
                             val contactName = extractContactNameFromRow(rowContainer) ?: "Contact ${items.size}"
-                            android.util.Log.d("WireAuto", "Conversation row ${items.size}: name='$contactName', className=${rowContainer.className}, clickable=${rowContainer.isClickable}")
+                            android.util.Log.d("WireAuto", "Conversation row ${items.size}: name='$contactName', className=${rowContainer.className}, clickable=${rowContainer.isClickable}, bounds=(${bounds.left},${bounds.top})")
                         } else {
-                            // Fallback: use child if container not found
-                            items.add(child)
-                            android.util.Log.d("WireAuto", "Conversation row ${items.size} (no container): className=${child.className}, clickable=${child.isClickable}")
+                            android.util.Log.d("WireAuto", "Skipping duplicate row at position $i (same Y position)")
                         }
                     } else {
                         android.util.Log.d("WireAuto", "Skipping non-conversation item $i: className=${child.className}")
@@ -360,20 +369,26 @@ class WireAutomationService : AccessibilityService() {
                 val allContainers = mutableListOf<AccessibilityNodeInfo>()
                 findClickableContainersInRecyclerView(recyclerView, allContainers)
                 
-                // Filter to only actual conversation rows
+                // Filter to only actual conversation rows and deduplicate by position
                 val filteredContainers = allContainers.filter { isActualConversationRow(it) }
-                items.addAll(filteredContainers.distinctBy { 
+                val uniqueContainers = filteredContainers.distinctBy { container ->
                     val bounds = android.graphics.Rect()
-                    it.getBoundsInScreen(bounds)
-                    "${bounds.top}_${bounds.left}"
-                })
-                android.util.Log.d("WireAuto", "Found ${items.size} conversation containers after filtering")
+                    container.getBoundsInScreen(bounds)
+                    "${bounds.top / 100}" // Group by vertical position
+                }
+                items.addAll(uniqueContainers)
+                android.util.Log.d("WireAuto", "Found ${items.size} unique conversation containers after filtering")
             }
             
             items
         } else {
             android.util.Log.w("WireAuto", "No RecyclerView found, falling back to contact items list")
-            contactItems.toList()
+            // Deduplicate contact items by position
+            contactItems.distinctBy { 
+                val bounds = android.graphics.Rect()
+                it.getBoundsInScreen(bounds)
+                "${bounds.top / 100}" // Group by vertical position
+            }
         }
         
         val totalContacts = rowItems.size
@@ -497,55 +512,123 @@ class WireAutomationService : AccessibilityService() {
                 }
                 
                 // Refresh the row item from current root (it might be stale)
-                // Find the row item at this index in the RecyclerView
-                val refreshedRowItem = if (recyclerView != null && index < recyclerView.childCount) {
-                    recyclerView.getChild(index) ?: rowItem
-                } else {
-                    // Fallback: try to find by text if RecyclerView not available
+                // Get fresh RecyclerView and find the row at this index
+                var refreshedRowItem: AccessibilityNodeInfo? = null
+                val freshRecyclerView = findRecyclerView(currentRoot)
+                
+                if (freshRecyclerView != null && index < freshRecyclerView.childCount) {
+                    // Get fresh child at this index
+                    refreshedRowItem = freshRecyclerView.getChild(index)
+                    if (refreshedRowItem != null) {
+                        // Find the actual row container
+                        refreshedRowItem = findConversationRowContainer(refreshedRowItem) ?: refreshedRowItem
+                    }
+                }
+                
+                // Fallback: try to find by contact name
+                if (refreshedRowItem == null) {
                     val cleanContactName = contactName.removePrefix("You: ").trim()
-                    findContactNodeByText(currentRoot, contactName)
+                    refreshedRowItem = findContactNodeByText(currentRoot, contactName)
                         ?: findContactNodeByText(currentRoot, cleanContactName)
-                        ?: rowItem
+                }
+                
+                // Final fallback: use original row item
+                if (refreshedRowItem == null) {
+                    refreshedRowItem = rowItem
+                    android.util.Log.w("WireAuto", "Could not refresh row item, using original (may be stale)")
                 }
                 
                 android.util.Log.d("WireAuto", "Attempting to click contact row at index $index: $contactName")
                 android.util.Log.d("WireAuto", "Row item: clickable=${refreshedRowItem.isClickable}, className=${refreshedRowItem.className}")
                 
-                // Find the clickable container for this row
-                val clickableContainer = findClickableContainer(refreshedRowItem)
-                val nodeToClick = clickableContainer ?: refreshedRowItem
+                // Get bounds for gesture dispatch (most reliable method)
+                val bounds = android.graphics.Rect()
+                refreshedRowItem.getBoundsInScreen(bounds)
                 
-                android.util.Log.d("WireAuto", "Using node to click: clickable=${nodeToClick.isClickable}, className=${nodeToClick.className}")
-                
-                // Try multiple click methods - but focus on the row item itself
-                var clicked = false
-                
-                // Method 1: Direct click on row item
-                if (nodeToClick.isClickable) {
-                    clicked = nodeToClick.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    android.util.Log.d("WireAuto", "Method 1 - Direct click on row: $clicked")
+                if (bounds.width() <= 0 || bounds.height() <= 0) {
+                    android.util.Log.w("WireAuto", "Invalid bounds for row item, cannot click")
+                    contactResults.add(com.wireautomessenger.model.ContactResult(
+                        name = contactName,
+                        status = com.wireautomessenger.model.ContactStatus.FAILED,
+                        errorMessage = "Invalid bounds for contact row",
+                        position = index + 1
+                    ))
+                    sendContactUpdate(contactName, "failed", index + 1, "Invalid bounds")
+                    continue
                 }
                 
-                // Method 2: Find and click any clickable child in the row
+                val centerX = bounds.centerX().toFloat()
+                val centerY = bounds.centerY().toFloat()
+                
+                android.util.Log.d("WireAuto", "Row bounds: left=${bounds.left}, top=${bounds.top}, right=${bounds.right}, bottom=${bounds.bottom}")
+                android.util.Log.d("WireAuto", "Click center: ($centerX, $centerY)")
+                
+                // Try multiple click methods - prioritize gesture dispatch as it's most reliable
+                var clicked = false
+                
+                // Method 1: Use gesture dispatch (simulate touch) - MOST RELIABLE
+                try {
+                    val path = android.graphics.Path()
+                    path.moveTo(centerX, centerY)
+                    
+                    val stroke = android.accessibilityservice.GestureDescription.StrokeDescription(
+                        path, 0, 150 // 150ms tap
+                    )
+                    
+                    val gesture = android.accessibilityservice.GestureDescription.Builder()
+                        .addStroke(stroke)
+                        .build()
+                    
+                    var gestureCompleted = false
+                    clicked = dispatchGesture(gesture, object : android.accessibilityservice.AccessibilityService.GestureResultCallback() {
+                        override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                            gestureCompleted = true
+                            android.util.Log.d("WireAuto", "Gesture completed successfully")
+                        }
+                        override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                            android.util.Log.w("WireAuto", "Gesture was cancelled")
+                        }
+                    }, null)
+                    
+                    android.util.Log.d("WireAuto", "Method 1 - Gesture dispatch: $clicked")
+                    if (clicked) {
+                        delay(800) // Wait for gesture to complete and UI to respond
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("WireAuto", "Gesture dispatch failed: ${e.message}")
+                }
+                
+                // Method 2: Direct click on row item
+                if (!clicked && refreshedRowItem.isClickable) {
+                    clicked = refreshedRowItem.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    android.util.Log.d("WireAuto", "Method 2 - Direct click on row: $clicked")
+                    if (clicked) delay(500)
+                }
+                
+                // Method 3: Find and click any clickable child in the row
                 if (!clicked) {
                     for (i in 0 until refreshedRowItem.childCount) {
                         val child = refreshedRowItem.getChild(i)
                         if (child != null && child.isClickable) {
                             clicked = child.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            android.util.Log.d("WireAuto", "Method 2 - Clicked clickable child $i in row: $clicked")
-                            if (clicked) break
+                            android.util.Log.d("WireAuto", "Method 3 - Clicked clickable child $i in row: $clicked")
+                            if (clicked) {
+                                delay(500)
+                                break
+                            }
                         }
                     }
                 }
                 
-                // Method 3: Find clickable parent (the row container itself)
+                // Method 4: Find clickable parent (the row container itself)
                 if (!clicked) {
                     var parent = refreshedRowItem.parent
                     var depth = 0
                     while (parent != null && depth < 5 && !clicked) {
                         if (parent.isClickable) {
                             clicked = parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            android.util.Log.d("WireAuto", "Method 3 - Clicked parent at depth $depth: $clicked")
+                            android.util.Log.d("WireAuto", "Method 4 - Clicked parent at depth $depth: $clicked")
+                            if (clicked) delay(500)
                             break
                         }
                         parent = parent.parent
@@ -553,77 +636,20 @@ class WireAutomationService : AccessibilityService() {
                     }
                 }
                 
-                // Method 4: Try clicking the row item even if not explicitly clickable
-                // (Some rows are clickable but not marked as such)
+                // Method 5: Try clicking the row item even if not explicitly clickable
                 if (!clicked) {
                     clicked = refreshedRowItem.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    android.util.Log.d("WireAuto", "Method 4 - Force click on row item: $clicked")
+                    android.util.Log.d("WireAuto", "Method 5 - Force click on row item: $clicked")
+                    if (clicked) delay(500)
                 }
                 
-                // Method 5: Use findClickableNode helper
+                // Method 6: Use findClickableNode helper
                 if (!clicked) {
                     val clickableNode = findClickableNode(refreshedRowItem)
                     if (clickableNode != null) {
                         clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                        android.util.Log.d("WireAuto", "Method 5 - Clicked via findClickableNode: $clicked")
-                    }
-                }
-                
-                // Method 6: Try long click
-                if (!clicked) {
-                    clicked = refreshedRowItem.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
-                    android.util.Log.d("WireAuto", "Method 6 - Long click on row: $clicked")
-                }
-                
-                // Method 7: Try clicking using bounds/coordinates
-                if (!clicked) {
-                    val bounds = android.graphics.Rect()
-                    refreshedRowItem.getBoundsInScreen(bounds)
-                    if (bounds.width() > 0 && bounds.height() > 0) {
-                        val clickableAtBounds = findClickableNodeAtBounds(currentRoot, bounds)
-                        if (clickableAtBounds != null) {
-                            clicked = clickableAtBounds.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            android.util.Log.d("WireAuto", "Method 7 - Clicked at bounds: $clicked")
-                        }
-                    }
-                }
-                
-                // Method 8: Use gesture dispatch (simulate touch) as last resort
-                if (!clicked) {
-                    val bounds = android.graphics.Rect()
-                    refreshedRowItem.getBoundsInScreen(bounds)
-                    if (bounds.width() > 0 && bounds.height() > 0) {
-                        val centerX = bounds.centerX().toFloat()
-                        val centerY = bounds.centerY().toFloat()
-                        
-                        try {
-                            val path = android.graphics.Path()
-                            path.moveTo(centerX, centerY)
-                            
-                            val stroke = android.accessibilityservice.GestureDescription.StrokeDescription(
-                                path, 0, 100 // 100ms tap
-                            )
-                            
-                            val gesture = android.accessibilityservice.GestureDescription.Builder()
-                                .addStroke(stroke)
-                                .build()
-                            
-                            clicked = dispatchGesture(gesture, object : android.accessibilityservice.AccessibilityService.GestureResultCallback() {
-                                override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) {
-                                    android.util.Log.d("WireAuto", "Gesture completed successfully")
-                                }
-                                override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) {
-                                    android.util.Log.w("WireAuto", "Gesture was cancelled")
-                                }
-                            }, null)
-                            
-                            android.util.Log.d("WireAuto", "Method 8 - Gesture dispatch: $clicked")
-                            if (clicked) {
-                                delay(500) // Wait for gesture to complete
-                            }
-                        } catch (e: Exception) {
-                            android.util.Log.e("WireAuto", "Gesture dispatch failed: ${e.message}")
-                        }
+                        android.util.Log.d("WireAuto", "Method 6 - Clicked via findClickableNode: $clicked")
+                        if (clicked) delay(500)
                     }
                 }
                 
@@ -800,32 +826,75 @@ class WireAutomationService : AccessibilityService() {
                 // Try to send the message
                 if (sendButton != null) {
                     android.util.Log.d("WireAuto", "Attempting to click send button...")
-                    // Click send button - try multiple methods
+                    
+                    // Get bounds for gesture dispatch (most reliable)
+                    val sendBounds = android.graphics.Rect()
+                    sendButton.getBoundsInScreen(sendBounds)
+                    
+                    // Click send button - try multiple methods, prioritize gesture dispatch
                     var clicked = false
                     
-                    // Method 1: Direct click
-                    if (sendButton.isClickable) {
-                        clicked = sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                        android.util.Log.d("WireAuto", "Method 1 - Clicked send button directly: $clicked")
+                    // Method 1: Try gesture dispatch (simulate touch) - MOST RELIABLE
+                    if (sendBounds.width() > 0 && sendBounds.height() > 0) {
+                        try {
+                            val centerX = sendBounds.centerX().toFloat()
+                            val centerY = sendBounds.centerY().toFloat()
+                            
+                            val path = android.graphics.Path()
+                            path.moveTo(centerX, centerY)
+                            
+                            val stroke = android.accessibilityservice.GestureDescription.StrokeDescription(
+                                path, 0, 150 // 150ms tap
+                            )
+                            
+                            val gesture = android.accessibilityservice.GestureDescription.Builder()
+                                .addStroke(stroke)
+                                .build()
+                            
+                            clicked = dispatchGesture(gesture, object : android.accessibilityservice.AccessibilityService.GestureResultCallback() {
+                                override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                                    android.util.Log.d("WireAuto", "Send button gesture completed")
+                                }
+                                override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                                    android.util.Log.w("WireAuto", "Send button gesture cancelled")
+                                }
+                            }, null)
+                            
+                            android.util.Log.d("WireAuto", "Method 1 - Gesture dispatch on send button: $clicked")
+                            if (clicked) {
+                                delay(500) // Wait for gesture to complete
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("WireAuto", "Gesture dispatch failed: ${e.message}")
+                        }
                     }
                     
-                    // Method 2: Find clickable parent/child
+                    // Method 2: Direct click
+                    if (!clicked && sendButton.isClickable) {
+                        clicked = sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        android.util.Log.d("WireAuto", "Method 2 - Clicked send button directly: $clicked")
+                        if (clicked) delay(300)
+                    }
+                    
+                    // Method 3: Find clickable parent/child
                     if (!clicked) {
                         val clickableNode = findClickableNode(sendButton)
                         if (clickableNode != null) {
                             clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            android.util.Log.d("WireAuto", "Method 2 - Clicked send button via clickable node: $clicked")
+                            android.util.Log.d("WireAuto", "Method 3 - Clicked send button via clickable node: $clicked")
+                            if (clicked) delay(300)
                         }
                     }
                     
-                    // Method 3: Try clicking parent
+                    // Method 4: Try clicking parent
                     if (!clicked) {
                         var parent = sendButton.parent
                         var depth = 0
                         while (parent != null && depth < 5 && !clicked) {
                             if (parent.isClickable) {
                                 clicked = parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                                android.util.Log.d("WireAuto", "Method 3 - Clicked send button parent at depth $depth: $clicked")
+                                android.util.Log.d("WireAuto", "Method 4 - Clicked send button parent at depth $depth: $clicked")
+                                if (clicked) delay(300)
                                 break
                             }
                             parent = parent.parent
@@ -833,41 +902,11 @@ class WireAutomationService : AccessibilityService() {
                         }
                     }
                     
-                    // Method 4: Try long click (some apps use this)
+                    // Method 5: Try long click (some apps use this)
                     if (!clicked) {
                         clicked = sendButton.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
-                        android.util.Log.d("WireAuto", "Method 4 - Tried long click on send button: $clicked")
-                    }
-                    
-                    // Method 5: Try gesture dispatch (simulate touch on send button)
-                    if (!clicked) {
-                        try {
-                            val bounds = android.graphics.Rect()
-                            sendButton.getBoundsInScreen(bounds)
-                            if (bounds.width() > 0 && bounds.height() > 0) {
-                                val centerX = bounds.centerX().toFloat()
-                                val centerY = bounds.centerY().toFloat()
-                                
-                                val path = android.graphics.Path()
-                                path.moveTo(centerX, centerY)
-                                
-                                val stroke = android.accessibilityservice.GestureDescription.StrokeDescription(
-                                    path, 0, 100
-                                )
-                                
-                                val gesture = android.accessibilityservice.GestureDescription.Builder()
-                                    .addStroke(stroke)
-                                    .build()
-                                
-                                clicked = dispatchGesture(gesture, null, null)
-                                android.util.Log.d("WireAuto", "Method 5 - Gesture dispatch on send button: $clicked")
-                                if (clicked) {
-                                    delay(300)
-                                }
-                            }
-                        } catch (e: Exception) {
-                            android.util.Log.e("WireAuto", "Gesture dispatch failed: ${e.message}")
-                        }
+                        android.util.Log.d("WireAuto", "Method 5 - Tried long click on send button: $clicked")
+                        if (clicked) delay(300)
                     }
                     
                     if (clicked) {
@@ -1779,25 +1818,30 @@ class WireAutomationService : AccessibilityService() {
             if (isUIElement) {
                 // Skip UI elements
             } else {
-                if (!text.isNullOrEmpty() && text.length >= 3) {
+                if (!text.isNullOrEmpty() && text.length >= 2) {
                     // Filter out common tags and message previews
                     val lowerText = text.lowercase()
                     val isTag = lowerText == "guest" || lowerText.contains("tag") || 
-                               text.length <= 6 && text.all { it.isLetter() && it.isUpperCase() }
+                               (text.length <= 6 && text.all { it.isLetter() && it.isUpperCase() })
+                    // More strict message preview detection
                     val isMessagePreview = text.startsWith("You:") || 
                                           text.startsWith("you:") ||
-                                          text.length > 20 // Long texts are likely messages
-                    val isCommonUI = lowerText in listOf("search", "conversations", "new", "filter", "sort")
+                                          text.startsWith("W.Salam") || // Example from user's log
+                                          text.contains(":") && text.length > 15 || // Contains colon and is long (likely message)
+                                          (text.length > 25 && !text.contains(" ")) // Very long single word
+                    val isCommonUI = lowerText in listOf("search", "conversations", "new", "filter", "sort", "contact")
                     
                     if (!isTag && !isMessagePreview && !isCommonUI) {
                         textNodes.add(Triple(text, depth, text.length))
                     }
                 }
-                if (!contentDesc.isNullOrEmpty() && contentDesc.length >= 3) {
+                if (!contentDesc.isNullOrEmpty() && contentDesc.length >= 2) {
                     val lowerDesc = contentDesc.lowercase()
                     val isTag = lowerDesc == "guest" || lowerDesc.contains("tag")
-                    val isMessagePreview = contentDesc.startsWith("You:") || contentDesc.startsWith("you:")
-                    val isCommonUI = lowerDesc in listOf("search", "conversations", "new", "filter", "sort")
+                    val isMessagePreview = contentDesc.startsWith("You:") || 
+                                          contentDesc.startsWith("you:") ||
+                                          contentDesc.contains(":") && contentDesc.length > 15
+                    val isCommonUI = lowerDesc in listOf("search", "conversations", "new", "filter", "sort", "contact")
                     
                     if (!isTag && !isMessagePreview && !isCommonUI) {
                         textNodes.add(Triple(contentDesc, depth, contentDesc.length))
@@ -1817,17 +1861,35 @@ class WireAutomationService : AccessibilityService() {
         
         // Find the best contact name:
         // 1. Prefer names at shallow depth (usually the main contact name)
-        // 2. Prefer names with reasonable length (5-30 characters)
-        // 3. Exclude single words that are too short or too long
+        // 2. Prefer names with reasonable length (3-40 characters)
+        // 3. Exclude message previews more strictly
         val candidateNames = textNodes.filter { (text, _, length) ->
-            length in 5..30 && text.split(" ").size >= 1 // At least one word
+            // Filter out message previews more strictly
+            val isMessagePreview = text.contains(":") && text.length > 15 ||
+                                  text.startsWith("You:", ignoreCase = true) ||
+                                  text.startsWith("W.Salam") ||
+                                  (length > 25 && text.split(" ").size == 1) // Very long single word
+            length in 3..40 && !isMessagePreview && text.split(" ").size >= 1
         }
         
-        // Sort by depth (shallower first), then by length (medium length preferred)
+        // Sort by depth (shallower first), then by length (prefer shorter names - contact names are usually shorter than messages)
         val sortedNames = candidateNames.sortedWith(compareBy<Triple<String, Int, Int>> { it.second }
-            .thenBy { kotlin.math.abs(it.third - 15) }) // Prefer names around 15 chars
+            .thenBy { it.third }) // Prefer shorter names (contact names vs message previews)
         
-        return sortedNames.firstOrNull()?.first
+        val selectedName = sortedNames.firstOrNull()?.first
+        
+        // Final validation: ensure it's not a message preview
+        if (selectedName != null) {
+            val isMessagePreview = selectedName.contains(":") && selectedName.length > 15 ||
+                                  selectedName.startsWith("You:", ignoreCase = true) ||
+                                  selectedName.startsWith("W.Salam")
+            if (isMessagePreview) {
+                // Try next candidate
+                return sortedNames.getOrNull(1)?.first
+            }
+        }
+        
+        return selectedName
     }
     
     private fun findClickableContainer(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
