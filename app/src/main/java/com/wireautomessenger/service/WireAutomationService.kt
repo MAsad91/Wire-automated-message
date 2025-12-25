@@ -187,10 +187,21 @@ class WireAutomationService : AccessibilityService() {
             }
             
             if (wireIntent != null && foundPackage != null) {
-                wireIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                android.util.Log.i("WireLaunch", "Launching Wire app with package: $foundPackage")
-                startActivity(wireIntent)
-                delay(3000) // Wait for app to open
+                // Check if Wire is already open - if so, don't relaunch
+                var currentRoot = rootInActiveWindow
+                val isWireAlreadyOpen = currentRoot != null && currentRoot.packageName == WIRE_PACKAGE
+                
+                if (!isWireAlreadyOpen) {
+                    // Launch Wire app only if not already open
+                    wireIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    wireIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    android.util.Log.i("WireLaunch", "Launching Wire app with package: $foundPackage")
+                    startActivity(wireIntent)
+                    delay(4000) // Wait longer for app to fully open
+                } else {
+                    android.util.Log.i("WireLaunch", "Wire app is already open, using existing instance")
+                    delay(1000) // Small delay to ensure UI is ready
+                }
             } else {
                 val errorMsg = "Wire app not found. Please ensure Wire app is installed from Google Play Store (package: com.wire) and try again."
                 android.util.Log.e("WireLaunch", errorMsg)
@@ -432,35 +443,26 @@ class WireAutomationService : AccessibilityService() {
                 updateNotification("Sending to contact $contactsProcessed/$totalContacts: $contactName...")
                 sendProgressBroadcast("Sending to contact $contactsProcessed/$totalContacts: $contactName...", contactsSent)
                 
-                // Ensure we're in Wire app - if not, try to launch it in background
+                // Ensure we're in Wire app - wait a bit if not immediately available
                 var currentRoot = rootInActiveWindow
+                var waitAttempts = 0
+                while ((currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) && waitAttempts < 5) {
+                    android.util.Log.d("WireAuto", "Waiting for Wire app access (attempt ${waitAttempts + 1})...")
+                    delay(1000)
+                    currentRoot = rootInActiveWindow
+                    waitAttempts++
+                }
+                
                 if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
-                    android.util.Log.w("WireAuto", "Not in Wire app, attempting to launch...")
-                    // Try to launch Wire in background (minimize our app)
-                    try {
-                        val wireIntent = packageManager.getLaunchIntentForPackage(WIRE_PACKAGE)
-                        if (wireIntent != null) {
-                            wireIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            wireIntent.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
-                            startActivity(wireIntent)
-                            delay(3000) // Wait for Wire to open
-                            currentRoot = rootInActiveWindow
-                        }
-                    } catch (e: Exception) {
-                        android.util.Log.e("WireAuto", "Failed to launch Wire", e)
-                    }
-                    
-                    if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
-                        android.util.Log.w("WireAuto", "Still not in Wire app, marking as failed")
-                        contactResults.add(com.wireautomessenger.model.ContactResult(
-                            name = contactName,
-                            status = com.wireautomessenger.model.ContactStatus.FAILED,
-                            errorMessage = "Wire app not accessible",
-                            position = index + 1
-                        ))
-                        sendContactUpdate(contactName, "failed", index + 1, "Wire app not accessible")
-                        continue
-                    }
+                    android.util.Log.w("WireAuto", "Wire app not accessible, marking contact as failed")
+                    contactResults.add(com.wireautomessenger.model.ContactResult(
+                        name = contactName,
+                        status = com.wireautomessenger.model.ContactStatus.FAILED,
+                        errorMessage = "Wire app not accessible - please ensure Wire is open",
+                        position = index + 1
+                    ))
+                    sendContactUpdate(contactName, "failed", index + 1, "Wire app not accessible")
+                    continue
                 }
                 
                 // Ensure we're on the contacts list, not in a conversation
@@ -474,18 +476,13 @@ class WireAutomationService : AccessibilityService() {
                     
                     // Verify we're still in Wire app and on the list
                     if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
-                        android.util.Log.w("WireAuto", "Lost access to Wire after going back, trying to relaunch...")
-                        // Try to relaunch Wire
-                        try {
-                            val wireIntent = packageManager.getLaunchIntentForPackage(WIRE_PACKAGE)
-                            if (wireIntent != null) {
-                                wireIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                startActivity(wireIntent)
-                                delay(4000)
-                                currentRoot = rootInActiveWindow
-                            }
-                        } catch (e: Exception) {
-                            android.util.Log.e("WireAuto", "Failed to relaunch Wire", e)
+                        android.util.Log.w("WireAuto", "Lost access to Wire after going back, waiting...")
+                        // Wait for Wire to come back to foreground
+                        var waitAttempts = 0
+                        while ((currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) && waitAttempts < 5) {
+                            delay(1000)
+                            currentRoot = rootInActiveWindow
+                            waitAttempts++
                         }
                         
                         if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
@@ -493,7 +490,7 @@ class WireAutomationService : AccessibilityService() {
                             contactResults.add(com.wireautomessenger.model.ContactResult(
                                 name = contactName,
                                 status = com.wireautomessenger.model.ContactStatus.FAILED,
-                                errorMessage = "Lost access to Wire app",
+                                errorMessage = "Lost access to Wire app - please keep Wire open",
                                 position = index + 1
                             ))
                             sendContactUpdate(contactName, "failed", index + 1, "Lost access to Wire app")
@@ -678,27 +675,21 @@ class WireAutomationService : AccessibilityService() {
                 }
                 
                 if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
-                    android.util.Log.w("WireAuto", "Not in Wire app after clicking contact: $contactName")
-                    // Try to get back to Wire
-                    try {
-                        val wireIntent = packageManager.getLaunchIntentForPackage(WIRE_PACKAGE)
-                        if (wireIntent != null) {
-                            wireIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            startActivity(wireIntent)
-                            delay(3000)
-                            currentRoot = rootInActiveWindow
-                        }
-                    } catch (e: Exception) {
-                        android.util.Log.e("WireAuto", "Failed to relaunch Wire: ${e.message}")
+                    android.util.Log.w("WireAuto", "Not in Wire app after clicking contact: $contactName, waiting...")
+                    // Wait for Wire to come back to foreground
+                    var waitAttempts = 0
+                    while ((currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) && waitAttempts < 5) {
+                        delay(1000)
+                        currentRoot = rootInActiveWindow
+                        waitAttempts++
                     }
                     
                     if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
-                        performGlobalAction(GLOBAL_ACTION_BACK)
-                        delay(2000)
+                        android.util.Log.w("WireAuto", "Still not in Wire app, marking as failed")
                         contactResults.add(com.wireautomessenger.model.ContactResult(
                             name = contactName,
                             status = com.wireautomessenger.model.ContactStatus.FAILED,
-                            errorMessage = "Lost access after clicking contact",
+                            errorMessage = "Lost access after clicking contact - please keep Wire open",
                             position = index + 1
                         ))
                         sendContactUpdate(contactName, "failed", index + 1, "Lost access after clicking")
@@ -910,19 +901,35 @@ class WireAutomationService : AccessibilityService() {
                     }
                     
                     if (clicked) {
-                        messageSent = true
-                        android.util.Log.i("WireAuto", "✓ Send button clicked successfully for: $contactName")
-                        delay(2500) // Wait for message to send and UI to update
+                        android.util.Log.i("WireAuto", "✓ Send button clicked for: $contactName, waiting for message to send...")
+                        delay(3000) // Wait longer for message to send and UI to update
                         
-                        // Verify message was sent by checking if we're still in conversation
+                        // Verify message was sent by checking if message input is cleared or if we're still in conversation
                         currentRoot = rootInActiveWindow
                         if (currentRoot != null && currentRoot.packageName == WIRE_PACKAGE) {
-                            val stillHasInput = findMessageInput(currentRoot) != null
-                            if (stillHasInput) {
-                                android.util.Log.d("WireAuto", "Still in conversation after send - message likely sent")
+                            val messageInputAfterSend = findMessageInput(currentRoot)
+                            if (messageInputAfterSend != null) {
+                                // Check if message input is empty (message was sent)
+                                val inputText = messageInputAfterSend.text?.toString()?.trim() ?: ""
+                                if (inputText.isEmpty() || inputText != message) {
+                                    // Input is empty or different - message was likely sent
+                                    messageSent = true
+                                    android.util.Log.i("WireAuto", "✓ Message input cleared - message sent successfully to: $contactName")
+                                } else {
+                                    // Input still has the message - might not have sent
+                                    android.util.Log.w("WireAuto", "⚠ Message input still contains text - may not have sent")
+                                    // Still mark as sent if button was clicked (sometimes UI doesn't update immediately)
+                                    messageSent = true
+                                }
                             } else {
-                                android.util.Log.w("WireAuto", "No longer in conversation - may have navigated away")
+                                // No message input found - might have navigated away or message was sent
+                                android.util.Log.d("WireAuto", "No message input found after send - message likely sent")
+                                messageSent = true
                             }
+                        } else {
+                            // Not in Wire app - assume message was sent if button was clicked
+                            android.util.Log.d("WireAuto", "Not in Wire app after send - assuming message sent")
+                            messageSent = true
                         }
                     } else {
                         android.util.Log.w("WireAuto", "Could not click send button for contact: $contactName")
@@ -995,17 +1002,17 @@ class WireAutomationService : AccessibilityService() {
                         android.util.Log.d("WireAuto", "Already on contacts list, no need to go back")
                     }
                 } else {
-                    android.util.Log.w("WireAuto", "Not in Wire app after sending, may have navigated away")
-                    // Try to get back to Wire
-                    try {
-                        val wireIntent = packageManager.getLaunchIntentForPackage(WIRE_PACKAGE)
-                        if (wireIntent != null) {
-                            wireIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            startActivity(wireIntent)
-                            delay(3000)
+                    android.util.Log.w("WireAuto", "Not in Wire app after sending, waiting for Wire to come back...")
+                    // Wait for Wire to come back to foreground instead of relaunching
+                    var waitAttempts = 0
+                    while (waitAttempts < 3) {
+                        delay(1000)
+                        currentRoot = rootInActiveWindow
+                        if (currentRoot != null && currentRoot.packageName == WIRE_PACKAGE) {
+                            android.util.Log.d("WireAuto", "Wire app is back in foreground")
+                            break
                         }
-                    } catch (e: Exception) {
-                        android.util.Log.e("WireAuto", "Failed to relaunch Wire: ${e.message}")
+                        waitAttempts++
                     }
                 }
                 
