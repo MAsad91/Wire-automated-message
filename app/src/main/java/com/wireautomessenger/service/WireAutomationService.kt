@@ -832,9 +832,9 @@ class WireAutomationService : AccessibilityService() {
                 android.util.Log.i("WireAuto", "Message text set: $textSet")
                 
                 // Wait for text to be set and send button to be enabled (random delay 1-3 sec)
-                val randomDelay = (1000..3000).random()
-                android.util.Log.d("WireAuto", "Waiting ${randomDelay}ms for send button to be enabled...")
-                delay(randomDelay.toLong())
+                val typingDelay = (1000..3000).random()
+                android.util.Log.d("WireAuto", "Waiting ${typingDelay}ms for send button to be enabled...")
+                delay(typingDelay.toLong())
 
                 // Refresh root after typing
                 currentRoot = rootInActiveWindow
@@ -901,9 +901,9 @@ class WireAutomationService : AccessibilityService() {
                     }
                     
                     if (attempt < 3) {
-                        val randomDelay = (1000..3000).random() // Random delay 1-3 seconds
-                        android.util.Log.d("WireAuto", "Waiting ${randomDelay}ms before retry...")
-                        delay(randomDelay.toLong())
+                        val retryDelay = (1000..3000).random() // Random delay 1-3 seconds
+                        android.util.Log.d("WireAuto", "Waiting ${retryDelay}ms before retry...")
+                        delay(retryDelay.toLong())
                         currentRoot = rootInActiveWindow
                     }
                 }
@@ -940,8 +940,8 @@ class WireAutomationService : AccessibilityService() {
                             clicked = sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                             android.util.Log.i("WireAuto", "Method 1 - Direct click on send button: $clicked")
                             if (clicked) {
-                                val randomDelay = (1000..3000).random()
-                                delay(randomDelay.toLong())
+                                val clickDelay = (1000..3000).random()
+                                delay(clickDelay.toLong())
                             }
                         }
                         
@@ -973,8 +973,8 @@ class WireAutomationService : AccessibilityService() {
                                 
                                 android.util.Log.i("WireAuto", "Method 2 - Gesture dispatch on send button: $clicked")
                                 if (clicked) {
-                                    val randomDelay = (1000..3000).random()
-                                    delay(randomDelay.toLong())
+                                    val gestureDelay = (1000..3000).random()
+                                    delay(gestureDelay.toLong())
                                 }
                             } catch (e: Exception) {
                                 android.util.Log.e("WireAuto", "Gesture dispatch failed: ${e.message}")
@@ -990,8 +990,8 @@ class WireAutomationService : AccessibilityService() {
                                     clicked = parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                                     android.util.Log.i("WireAuto", "Method 3 - Clicked send button parent at depth $depth: $clicked")
                                     if (clicked) {
-                                        val randomDelay = (1000..3000).random()
-                                        delay(randomDelay.toLong())
+                                        val parentClickDelay = (1000..3000).random()
+                                        delay(parentClickDelay.toLong())
                                     }
                                     break
                                 }
@@ -1005,8 +1005,8 @@ class WireAutomationService : AccessibilityService() {
                             android.util.Log.i("WireAuto", "Send button clicked - verifying message was sent...")
                             
                             // Wait for UI to update
-                            val randomDelay = (1500..2500).random()
-                            delay(randomDelay.toLong())
+                            val verificationDelay = (1500..2500).random()
+                            delay(verificationDelay.toLong())
                             
                             // Refresh root to check verification
                             currentRoot = rootInActiveWindow
@@ -1085,9 +1085,9 @@ class WireAutomationService : AccessibilityService() {
                     if (stillInConversation) {
                         android.util.Log.d("WireAuto", "Still in conversation, going back to contacts list...")
                         performGlobalAction(GLOBAL_ACTION_BACK)
-                        val randomDelay = (2000..4000).random() // Random delay 2-4 seconds
-                        android.util.Log.d("WireAuto", "Waiting ${randomDelay}ms for navigation...")
-                        delay(randomDelay.toLong())
+                        val backDelay = (2000..4000).random() // Random delay 2-4 seconds
+                        android.util.Log.d("WireAuto", "Waiting ${backDelay}ms for navigation...")
+                        delay(backDelay.toLong())
                         
                         // Verify we're back on the list
                         currentRoot = rootInActiveWindow
@@ -1128,9 +1128,9 @@ class WireAutomationService : AccessibilityService() {
                 }
                 
                 // Small random delay before processing next contact to ensure UI is stable (1-3 sec)
-                val randomDelay = (1000..3000).random()
-                android.util.Log.d("WireAuto", "Waiting ${randomDelay}ms before next contact...")
-                delay(randomDelay.toLong())
+                val nextContactDelay = (1000..3000).random()
+                android.util.Log.d("WireAuto", "Waiting ${nextContactDelay}ms before next contact...")
+                delay(nextContactDelay.toLong())
 
             } catch (e: Exception) {
                 android.util.Log.e("WireAuto", "Error processing contact $contactsProcessed: ${e.message}", e)
