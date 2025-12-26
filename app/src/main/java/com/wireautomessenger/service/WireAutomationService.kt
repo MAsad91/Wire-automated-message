@@ -256,16 +256,28 @@ class WireAutomationService : AccessibilityService() {
                     } catch (e: Exception) {
                         debugLog("ERROR", "Failed to start foreground notification", e)
                         e.printStackTrace()
+                        // Reset state if notification fails
+                        resetState()
+                        return START_NOT_STICKY
                     }
                     // STABILITY HANDLER: Wrap in Handler().postDelayed() to prevent blocking main thread
                     Handler(Looper.getMainLooper()).postDelayed({
                         scope.launch {
-                            debugLog("ACTION", "Launching sendMessagesToAllContacts coroutine")
-                            sendMessagesToAllContacts()
+                            try {
+                                debugLog("ACTION", "Launching sendMessagesToAllContacts coroutine")
+                                sendMessagesToAllContacts()
+                            } catch (e: Exception) {
+                                debugLog("ERROR", "Fatal error in sendMessagesToAllContacts coroutine: ${e.message}", e)
+                                android.util.Log.e("WireAuto", "Fatal error in sendMessagesToAllContacts coroutine", e)
+                                sendErrorBroadcast("Fatal error: ${e.message ?: "Unknown error"}")
+                                resetState()
+                            }
                         }
                     }, 100) // Small delay to ensure service is fully initialized
                 } else {
                     debugLog("WARN", "Service already running - ignoring duplicate request")
+                    // Send a message to user that service is already running
+                    sendErrorBroadcast("Message sending is already in progress. Please wait for it to complete.")
                 }
             } else {
                 debugLog("INFO", "Unknown action received: ${intent?.action}")
@@ -358,20 +370,39 @@ class WireAutomationService : AccessibilityService() {
             val errorMsg = "Error: ${e.message ?: "Unknown error"}"
             debugLog("ERROR", "Fatal error in sendMessagesToAllContacts: $errorMsg", e)
             android.util.Log.e("WireAuto", "Fatal error in sendMessagesToAllContacts: $errorMsg", e)
-            updateNotification(errorMsg)
-            sendErrorBroadcast(errorMsg)
+            try {
+                updateNotification(errorMsg)
+                sendErrorBroadcast(errorMsg)
+            } catch (e2: Exception) {
+                android.util.Log.e("WireAuto", "Error sending error broadcast: ${e2.message}", e2)
+            }
             // Save debug log even on error
-            saveDebugLogToPrefs()
+            try {
+                saveDebugLogToPrefs()
+            } catch (e3: Exception) {
+                android.util.Log.e("WireAuto", "Error saving debug log: ${e3.message}", e3)
+            }
         } finally {
             debugLog("EVENT", "=== MESSAGE SENDING PROCESS COMPLETED ===")
             debugLog("STATE", "Final state - isRunning: ${isRunning.get()}, isWireOpened: ${isWireOpened.get()}, isSendingInProgress: ${isSendingInProgress.get()}")
             android.util.Log.i("WireAuto", "=== MESSAGE SENDING PROCESS COMPLETED ===")
             // Final save of debug log
-            saveDebugLogToPrefs()
+            try {
+                saveDebugLogToPrefs()
+            } catch (e: Exception) {
+                android.util.Log.e("WireAuto", "Error saving debug log in finally: ${e.message}", e)
+            }
+            // Always reset state before stopping
             resetState()
-            delay(2000)
-            stopForeground(true)
-            stopSelf()
+            try {
+                delay(2000)
+                stopForeground(true)
+                stopSelf()
+            } catch (e: Exception) {
+                android.util.Log.e("WireAuto", "Error stopping service: ${e.message}", e)
+                // Force reset state even if stopping fails
+                resetState()
+            }
         }
     }
 
@@ -454,6 +485,32 @@ class WireAutomationService : AccessibilityService() {
     }
 
     /**
+     * Ensure Wire app is in foreground, re-launch if necessary
+     * Returns true if Wire is in foreground, false if unable to bring it to foreground
+     */
+    private suspend fun ensureWireInForeground(): Boolean {
+        android.util.Log.d("WireAuto", "Checking if Wire is in foreground...")
+        val rootNode = rootInActiveWindow
+        
+        if (rootNode != null && rootNode.packageName == WIRE_PACKAGE) {
+            android.util.Log.d("WireAuto", "Wire is already in foreground")
+            return true
+        }
+        
+        android.util.Log.w("WireAuto", "Wire is not in foreground (current: ${rootNode?.packageName ?: "null"}), attempting to bring it back...")
+        
+        // Try to re-launch Wire app
+        val launchResult = launchWireAppOnce()
+        if (!launchResult) {
+            android.util.Log.e("WireAuto", "Failed to re-launch Wire app")
+            return false
+        }
+        
+        // Wait for Wire to come to foreground
+        return waitForWireInForeground(maxWaitSeconds = 10)
+    }
+
+    /**
      * Reset all state flags
      */
     private fun resetState() {
@@ -505,12 +562,32 @@ class WireAutomationService : AccessibilityService() {
         android.util.Log.i("WireAuto", "Waiting for Wire app UI to stabilize...")
         delay(3000) // Increased to 3 seconds to allow slow UI rendering to finish
 
+        // CRITICAL: Ensure Wire is still in foreground after delay
+        // The system might have switched back to Wire Auto Messenger
+        if (!ensureWireInForeground()) {
+            android.util.Log.e("WireAuto", "Wire app is not in foreground after delay")
+            sendErrorBroadcast("Wire app lost focus. Please ensure Wire stays open and try again.")
+            resetState()
+            return
+        }
+
         // PERSISTENT ROOT NODE: Use retry helper to get root node
-        var rootNode = getRootWithRetry(maxRetries = 3, delayMs = 500)
+        var rootNode = getRootWithRetry(maxRetries = 5, delayMs = 500)
         if (rootNode == null) {
             android.util.Log.e("WireAuto", "Could not access Wire app after retries")
+            // Try one more time to ensure Wire is in foreground
+            if (!ensureWireInForeground()) {
                 sendErrorBroadcast("Could not access Wire app. Please ensure Wire is open and try again.")
+                resetState()
                 return
+            }
+            rootNode = getRootWithRetry(maxRetries = 5, delayMs = 500)
+            if (rootNode == null) {
+                android.util.Log.e("WireAuto", "Could not access Wire app after second attempt")
+                sendErrorBroadcast("Could not access Wire app. Please ensure Wire is open and try again.")
+                resetState()
+                return
+            }
         }
         
         android.util.Log.i("WireAuto", "Wire app is accessible - package: ${rootNode.packageName}")
@@ -539,10 +616,18 @@ class WireAutomationService : AccessibilityService() {
         }
         
         if (rootNode == null) {
-            rootNode = getRootWithRetry(maxRetries = 3, delayMs = 500)
+            // Try to ensure Wire is in foreground before retrying
+            if (!ensureWireInForeground()) {
+                android.util.Log.e("WireAuto", "Wire app lost focus during refresh")
+                sendErrorBroadcast("Wire app lost focus. Please ensure Wire stays open and try again.")
+                resetState()
+                return
+            }
+            rootNode = getRootWithRetry(maxRetries = 5, delayMs = 500)
             if (rootNode == null) {
                 android.util.Log.e("WireAuto", "Could not get root node after refresh")
                 sendErrorBroadcast("Could not access Wire app. Please ensure Wire is open and try again.")
+                resetState()
                 return
             }
         }
@@ -760,6 +845,22 @@ class WireAutomationService : AccessibilityService() {
         val contactResults = mutableListOf<com.wireautomessenger.model.ContactResult>()
         
         for ((index, rowItem) in rowItems.withIndex()) {
+            // Periodically verify Wire is still in foreground (every 10 contacts)
+            if (index % 10 == 0 && index > 0) {
+                val rootCheck = rootInActiveWindow
+                if (rootCheck == null || rootCheck.packageName != WIRE_PACKAGE) {
+                    android.util.Log.w("WireAuto", "Wire lost focus during sending (contact $index), attempting to recover...")
+                    if (!ensureWireInForeground()) {
+                        android.util.Log.e("WireAuto", "Could not recover Wire app, stopping message sending")
+                        sendErrorBroadcast("Wire app lost focus during sending. Please ensure Wire stays open.")
+                        resetState()
+                        return
+                    }
+                    // Refresh root node after recovery
+                    delay(1000)
+                }
+            }
+            
             debugLog("EVENT", "--- Processing contact ${index + 1}/$totalContacts ---")
             android.util.Log.d("WireAuto", "--- Processing contact ${index + 1}/$totalContacts ---")
             if (contactsProcessed >= maxContacts) {
