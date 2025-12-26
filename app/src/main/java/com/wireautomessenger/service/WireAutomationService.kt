@@ -360,7 +360,9 @@ class WireAutomationService : AccessibilityService() {
         
         // Try to navigate to conversations/contacts list
         // Wire typically shows conversations by default, but we need to ensure we're on the right screen
-        navigateToConversationsList(rootNode)
+        if (rootNode != null) {
+            navigateToConversationsList(rootNode)
+        }
         delay(4000) // Wait longer for navigation to complete
 
         // Refresh root after navigation using retry helper
@@ -425,11 +427,11 @@ class WireAutomationService : AccessibilityService() {
                 android.util.Log.w("WireAuto", "No contacts found via standard methods, trying generic list interaction...")
                 rootNode = getRootWithRetry(maxRetries = 3, delayMs = 500)
                 if (rootNode != null) {
-                    if (clickFirstScrollableChildren(rootNode, maxChildren = 3)) {
+                    if (clickFirstScrollableChildren(rootNode!!, maxChildren = 3)) {
                         delay(2000) // Wait for UI to update
                         rootNode = getRootWithRetry(maxRetries = 3, delayMs = 500)
                         if (rootNode != null) {
-                            contactItems = getAllContactItems(rootNode)
+                            contactItems = getAllContactItems(rootNode!!)
                             android.util.Log.d("WireAuto", "After generic interaction: ${contactItems.size} contacts found")
                         }
                     }
@@ -438,8 +440,8 @@ class WireAutomationService : AccessibilityService() {
             
             if (contactItems.isEmpty()) {
                 // Collect debug info about what we found, including class names
-                val debugInfo = collectDebugInfo(rootNode)
-                val classNamesInfo = collectClassNamesInfo(rootNode)
+                val debugInfo = if (rootNode != null) collectDebugInfo(rootNode!!) else "Root node is null"
+                val classNamesInfo = if (rootNode != null) collectClassNamesInfo(rootNode!!) else "Root node is null"
                 
                 val errorMsg = "No contacts found in Wire app.\n\n" +
                         "📋 Troubleshooting Steps:\n\n" +
@@ -464,7 +466,12 @@ class WireAutomationService : AccessibilityService() {
         
         // NEW APPROACH: Find RecyclerView and identify actual conversation row items
         // Filter out UI elements like search bars, headers, FAB buttons
-        val recyclerView = findRecyclerView(rootNode)
+        if (rootNode == null) {
+            android.util.Log.e("WireAuto", "Root node is null, cannot find RecyclerView")
+            sendErrorBroadcast("Lost access to Wire app. Please try again.")
+            return
+        }
+        val recyclerView = findRecyclerView(rootNode!!)
         val rowItems = if (recyclerView != null) {
             android.util.Log.d("WireAuto", "Found RecyclerView, identifying conversation row items...")
             val items = mutableListOf<AccessibilityNodeInfo>()
@@ -653,22 +660,24 @@ class WireAutomationService : AccessibilityService() {
                 // Refresh the row item from current root (it might be stale)
                 // Get fresh RecyclerView and find the row at this index
                 var refreshedRowItem: AccessibilityNodeInfo? = null
-                val freshRecyclerView = findRecyclerView(currentRoot)
-                
-                if (freshRecyclerView != null && index < freshRecyclerView.childCount) {
-                    // Get fresh child at this index
-                    refreshedRowItem = freshRecyclerView.getChild(index)
-                    if (refreshedRowItem != null) {
-                        // Find the actual row container
-                        refreshedRowItem = findConversationRowContainer(refreshedRowItem) ?: refreshedRowItem
+                if (currentRoot != null) {
+                    val freshRecyclerView = findRecyclerView(currentRoot!!)
+                    
+                    if (freshRecyclerView != null && index < freshRecyclerView.childCount) {
+                        // Get fresh child at this index
+                        val child = freshRecyclerView.getChild(index)
+                        if (child != null) {
+                            // Find the actual row container
+                            refreshedRowItem = findConversationRowContainer(child) ?: child
+                        }
                     }
-                }
-                
-                // Fallback: try to find by contact name
-                if (refreshedRowItem == null) {
-                    val cleanContactName = contactName.removePrefix("You: ").trim()
-                    refreshedRowItem = findContactNodeByText(currentRoot, contactName)
-                        ?: findContactNodeByText(currentRoot, cleanContactName)
+                    
+                    // Fallback: try to find by contact name
+                    if (refreshedRowItem == null) {
+                        val cleanContactName = contactName.removePrefix("You: ").trim()
+                        refreshedRowItem = findContactNodeByText(currentRoot!!, contactName)
+                            ?: findContactNodeByText(currentRoot!!, cleanContactName)
+                    }
                 }
                 
                 // Final fallback: use original row item
@@ -869,7 +878,10 @@ class WireAutomationService : AccessibilityService() {
                     val inputBounds = android.graphics.Rect()
                     messageInput.getBoundsInScreen(inputBounds)
                     val screenBounds = android.graphics.Rect()
-                    currentRoot.getBoundsInScreen(screenBounds)
+                    currentRoot?.getBoundsInScreen(screenBounds) ?: run {
+                        android.util.Log.w("WireAuto", "Current root is null, cannot check keyboard blocking")
+                        return@try
+                    }
                     
                     // Check if input is in bottom 30% of screen (likely blocked by keyboard)
                     val screenHeight = screenBounds.height()
@@ -1774,7 +1786,7 @@ class WireAutomationService : AccessibilityService() {
     /**
      * PERSISTENT ROOT NODE: Retry getting rootInActiveWindow at least 3 times with 500ms delay
      */
-    private fun getRootWithRetry(maxRetries: Int = 3, delayMs: Long = 500): AccessibilityNodeInfo? {
+    private suspend fun getRootWithRetry(maxRetries: Int = 3, delayMs: Long = 500): AccessibilityNodeInfo? {
         for (attempt in 1..maxRetries) {
             val root = rootInActiveWindow
             if (root != null && root.packageName == WIRE_PACKAGE) {
@@ -1793,7 +1805,7 @@ class WireAutomationService : AccessibilityService() {
     /**
      * GENERIC LIST INTERACTION: Find first scrollable view and click first 3 children by coordinates
      */
-    private fun clickFirstScrollableChildren(root: AccessibilityNodeInfo, maxChildren: Int = 3): Boolean {
+    private suspend fun clickFirstScrollableChildren(root: AccessibilityNodeInfo, maxChildren: Int = 3): Boolean {
         android.util.Log.d("WireAuto", "Attempting generic list interaction - finding scrollable view...")
         val scrollableView = findScrollableView(root)
         
@@ -1892,7 +1904,7 @@ class WireAutomationService : AccessibilityService() {
         }
     }
     
-    private fun navigateToConversationsList(root: AccessibilityNodeInfo) {
+    private suspend fun navigateToConversationsList(root: AccessibilityNodeInfo) {
         // Try to find and click on "Conversations" or "Chats" tab/button
         val conversationsButton = findNodeByText(root, "Conversations")
             ?: findNodeByText(root, "Chats")
