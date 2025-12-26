@@ -1326,38 +1326,40 @@ class WireAutomationService : AccessibilityService() {
                 // Handle keyboard blocking - scroll if needed
                 debugLog("NAVIGATION", "Checking if keyboard is blocking message input")
                 try {
-                    val inputBounds = android.graphics.Rect()
-                    messageInput.getBoundsInScreen(inputBounds)
-                    val screenBounds = android.graphics.Rect()
-                    if (currentRoot == null) {
-                        android.util.Log.w("WireAuto", "Current root is null, cannot check keyboard blocking")
-                    } else {
-                        currentRoot.getBoundsInScreen(screenBounds)
-                        
-                        // Check if input is in bottom 30% of screen (likely blocked by keyboard)
-                        val screenHeight = screenBounds.height()
-                        val inputBottom = inputBounds.bottom
-                        val bottomThreshold = screenHeight * 0.7
-                        
-                        if (inputBottom > bottomThreshold) {
-                            android.util.Log.d("WireAuto", "Message input may be blocked by keyboard, attempting to scroll...")
-                            // Try to scroll the message input into view
-                            if (messageInput.isScrollable) {
-                                messageInput.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
-                                delay(500)
-                            } else {
-                                // Find scrollable parent and scroll
-                                var parent = messageInput.parent
-                                var depth = 0
-                                while (parent != null && depth < 5) {
-                                    if (parent.isScrollable) {
-                                        parent.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
-                                        delay(500)
-                                        android.util.Log.d("WireAuto", "Scrolled parent at depth $depth to reveal input")
-                                        break
+                    messageInput?.let { input ->
+                        val inputBounds = android.graphics.Rect()
+                        input.getBoundsInScreen(inputBounds)
+                        val screenBounds = android.graphics.Rect()
+                        if (currentRoot == null) {
+                            android.util.Log.w("WireAuto", "Current root is null, cannot check keyboard blocking")
+                        } else {
+                            currentRoot.getBoundsInScreen(screenBounds)
+                            
+                            // Check if input is in bottom 30% of screen (likely blocked by keyboard)
+                            val screenHeight = screenBounds.height()
+                            val inputBottom = inputBounds.bottom
+                            val bottomThreshold = screenHeight * 0.7
+                            
+                            if (inputBottom > bottomThreshold) {
+                                android.util.Log.d("WireAuto", "Message input may be blocked by keyboard, attempting to scroll...")
+                                // Try to scroll the message input into view
+                                if (input.isScrollable) {
+                                    input.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                                    delay(500)
+                                } else {
+                                    // Find scrollable parent and scroll
+                                    var parent = input.parent
+                                    var depth = 0
+                                    while (parent != null && depth < 5) {
+                                        if (parent.isScrollable) {
+                                            parent.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                                            delay(500)
+                                            android.util.Log.d("WireAuto", "Scrolled parent at depth $depth to reveal input")
+                                            break
+                                        }
+                                        parent = parent.parent
+                                        depth++
                                     }
-                                    parent = parent.parent
-                                    depth++
                                 }
                             }
                         }
@@ -1369,27 +1371,31 @@ class WireAutomationService : AccessibilityService() {
                 // FORCE FOCUS BEFORE TYPING: Perform ACTION_CLICK and ACTION_FOCUS before ACTION_SET_TEXT
                 android.util.Log.d("WireAuto", "Force focusing message input before typing...")
                 try {
-                    // First, click on the input field using gesture dispatch
-                    if (clickNodeWithGesture(messageInput)) {
-                        android.util.Log.d("WireAuto", "Clicked message input via gesture")
+                    messageInput?.let { input ->
+                        // First, click on the input field using gesture dispatch
+                        if (clickNodeWithGesture(input)) {
+                            android.util.Log.d("WireAuto", "Clicked message input via gesture")
+                            delay(500)
+                        }
+                        
+                        // Then, perform ACTION_FOCUS
+                        input.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                        android.util.Log.d("WireAuto", "Focused message input")
                         delay(500)
                     }
-                    
-                    // Then, perform ACTION_FOCUS
-                    messageInput.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-                    android.util.Log.d("WireAuto", "Focused message input")
-                    delay(500)
                 } catch (e: Exception) {
                     android.util.Log.w("WireAuto", "Could not force focus message input: ${e.message}")
                 }
 
                 // Clear any existing text first
                 try {
-                    // Try to select all and delete
-                    val bundleClear = android.os.Bundle()
-                    bundleClear.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
-                    messageInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundleClear)
-                    delay(300)
+                    messageInput?.let { input ->
+                        // Try to select all and delete
+                        val bundleClear = android.os.Bundle()
+                        bundleClear.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+                        input.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundleClear)
+                        delay(300)
+                    }
                 } catch (e: Exception) {
                     android.util.Log.d("WireAuto", "Could not clear text: ${e.message}")
                 }
@@ -1406,16 +1412,28 @@ class WireAutomationService : AccessibilityService() {
                 var textSet = false
                 var textVerified = false
                 for (textAttempt in 1..3) {
+                    if (messageInput == null) {
+                        android.util.Log.w("WireAuto", "Message input is null on attempt $textAttempt, refreshing...")
+                        currentRoot = getRootWithRetry(maxRetries = 2, delayMs = 300)
+                        if (currentRoot != null) {
+                            messageInput = findMessageInput(currentRoot)
+                        }
+                        if (messageInput == null) {
+                            android.util.Log.e("WireAuto", "Could not find message input after refresh")
+                            break
+                        }
+                    }
+                    
                     val bundle = android.os.Bundle()
                     bundle.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, message)
-                    textSet = messageInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
+                    textSet = messageInput?.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle) ?: false
                     debugLog("TEXT", "ACTION_SET_TEXT attempt $textAttempt result: $textSet")
                     android.util.Log.i("WireAuto", "Message text set attempt $textAttempt: $textSet")
                     
                     if (textSet) {
                         // Wait a moment and verify text was actually set
                         delay(500)
-                        val currentText = messageInput.text?.toString()?.trim() ?: ""
+                        val currentText = messageInput?.text?.toString()?.trim() ?: ""
                         if (currentText == message || currentText.contains(message.take(10))) {
                             textVerified = true
                             debugLog("TEXT", "Text verified in input field: ${currentText.take(50)}...")
