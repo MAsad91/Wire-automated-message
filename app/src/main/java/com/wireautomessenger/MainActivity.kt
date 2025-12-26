@@ -47,6 +47,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var progressBar: ProgressBar
     private lateinit var llProgress: LinearLayout
     private lateinit var toolbar: com.google.android.material.appbar.MaterialToolbar
+    private lateinit var btnCopyDebugLog: MaterialButton
+    private lateinit var btnCopyDebugReport: MaterialButton
 
     private val prefs by lazy {
         getSharedPreferences("WireAutoMessenger", Context.MODE_PRIVATE)
@@ -102,6 +104,7 @@ class MainActivity : AppCompatActivity() {
         checkAccessibilityService()
         checkWireAppInstalled()
         updateScheduleStatus()
+        updateDebugButtons()
         
         // Check if sending was completed while app was in background
         val sendingComplete = prefs.getBoolean("sending_complete", false)
@@ -253,6 +256,8 @@ class MainActivity : AppCompatActivity() {
         tvNextSend = findViewById(R.id.tvNextSend)
         progressBar = findViewById(R.id.progressBar)
         llProgress = findViewById(R.id.llProgress)
+        btnCopyDebugLog = findViewById(R.id.btnCopyDebugLog)
+        btnCopyDebugReport = findViewById(R.id.btnCopyDebugReport)
         
         // Set up toolbar menu
         toolbar.inflateMenu(R.menu.main_menu)
@@ -395,6 +400,14 @@ class MainActivity : AppCompatActivity() {
 
         btnSendNow.setOnClickListener {
             sendMessagesNow()
+        }
+
+        btnCopyDebugLog.setOnClickListener {
+            copyDebugLogToClipboard()
+        }
+
+        btnCopyDebugReport.setOnClickListener {
+            copyDebugReportToClipboard()
         }
 
         switchSchedule.setOnCheckedChangeListener { _, isChecked ->
@@ -842,6 +855,7 @@ class MainActivity : AppCompatActivity() {
             
             // Show detailed results dialog
             showResultsDialog(contactsSent, totalContacts)
+            updateDebugButtons()
             
             // Reset UI after 5 seconds (longer to allow viewing results)
             btnSendNow.postDelayed({
@@ -865,6 +879,7 @@ class MainActivity : AppCompatActivity() {
             
             // Show detailed error dialog with scrollable text
             showDetailedErrorDialog(errorMessage)
+            updateDebugButtons()
         }
     }
     
@@ -1064,6 +1079,47 @@ class MainActivity : AppCompatActivity() {
             android.util.Log.e("WireAuto", "Error retrieving operation report: ${e.message}")
             ""
         }
+    }
+
+    private fun copyDebugLogToClipboard() {
+        val log = getDebugLogFromPrefs()
+        copyTextToClipboard(
+            label = "Wire Debug Log",
+            text = log,
+            emptyMessage = "Debug log is empty. Please run the automation first.",
+            successMessage = "Debug log copied to clipboard"
+        )
+    }
+
+    private fun copyDebugReportToClipboard() {
+        val report = getLastOperationReport()
+        copyTextToClipboard(
+            label = "Wire Broadcast Report",
+            text = report,
+            emptyMessage = "No debug report available yet.",
+            successMessage = "Debug report copied to clipboard"
+        )
+    }
+
+    private fun copyTextToClipboard(label: String, text: String, emptyMessage: String, successMessage: String) {
+        if (text.isEmpty()) {
+            Toast.makeText(this, emptyMessage, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        val clip = android.content.ClipData.newPlainText(label, text)
+        clipboard.setPrimaryClip(clip)
+        Toast.makeText(this, successMessage, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun updateDebugButtons() {
+        val logAvailable = getDebugLogFromPrefs().isNotEmpty()
+        btnCopyDebugLog.isEnabled = logAvailable
+        btnCopyDebugLog.alpha = if (logAvailable) 1f else 0.5f
+
+        val reportAvailable = getLastOperationReport().isNotEmpty()
+        btnCopyDebugReport.isEnabled = reportAvailable
+        btnCopyDebugReport.alpha = if (reportAvailable) 1f else 0.5f
     }
     
     /**
