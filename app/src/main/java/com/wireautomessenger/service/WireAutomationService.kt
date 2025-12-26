@@ -825,7 +825,7 @@ class WireAutomationService : AccessibilityService() {
                         android.util.Log.d("WireAuto", "Message input may be blocked by keyboard, attempting to scroll...")
                         // Try to scroll the message input into view
                         if (messageInput.isScrollable) {
-                            messageInput.performAction(AccessibilityNodeInfo.ACTION_SCROLL_DOWN)
+                            messageInput.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
                             delay(500)
                         } else {
                             // Find scrollable parent and scroll
@@ -833,7 +833,7 @@ class WireAutomationService : AccessibilityService() {
                             var depth = 0
                             while (parent != null && depth < 5) {
                                 if (parent.isScrollable) {
-                                    parent.performAction(AccessibilityNodeInfo.ACTION_SCROLL_DOWN)
+                                    parent.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
                                     delay(500)
                                     android.util.Log.d("WireAuto", "Scrolled parent at depth $depth to reveal input")
                                     break
