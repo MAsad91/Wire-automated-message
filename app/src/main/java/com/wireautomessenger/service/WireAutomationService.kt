@@ -46,6 +46,7 @@ class WireAutomationService : AccessibilityService() {
     private val debugLog = StringBuilder()
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
     private val maxLogSize = 50000 // Max 50KB of logs to prevent memory issues
+    private var sessionStartTime: Long = 0L
 
     companion object {
         const val ACTION_SEND_MESSAGES = "com.wireautomessenger.SEND_MESSAGES"
@@ -176,6 +177,69 @@ class WireAutomationService : AccessibilityService() {
         }
     }
     
+    private fun clearOperationReport() {
+        try {
+            prefs.edit().remove("last_operation_report").apply()
+            debugLog("REPORT", "Cleared previous operation report")
+        } catch (e: Exception) {
+            debugLog("ERROR", "Failed to clear operation report", e)
+        }
+    }
+    
+    private fun saveOperationReport(report: String) {
+        try {
+            prefs.edit().putString("last_operation_report", report).apply()
+            debugLog("REPORT", "Operation report saved (${report.length} chars)")
+        } catch (e: Exception) {
+            debugLog("ERROR", "Failed to save operation report", e)
+        }
+    }
+    
+    private fun buildOperationReport(
+        totalContacts: Int,
+        contactsProcessed: Int,
+        contactsSent: Int,
+        contactResults: List<com.wireautomessenger.model.ContactResult>,
+        durationMillis: Long
+    ): String {
+        val durationSeconds = durationMillis / 1000.0
+        val failedCount = contactResults.count { it.status == com.wireautomessenger.model.ContactStatus.FAILED }
+        val skippedCount = contactResults.count { it.status == com.wireautomessenger.model.ContactStatus.SKIPPED }
+        val timestamp = dateFormat.format(Date())
+        
+        val builder = StringBuilder()
+        builder.appendLine("Wire Auto Messenger Broadcast Report")
+        builder.appendLine("Generated: $timestamp")
+        builder.appendLine("Duration: ${"%.1f".format(durationSeconds)} seconds")
+        builder.appendLine("========================================")
+        builder.appendLine("Contacts detected: $totalContacts")
+        builder.appendLine("Contacts processed: $contactsProcessed")
+        builder.appendLine("Messages sent: $contactsSent")
+        builder.appendLine("Failed: $failedCount")
+        builder.appendLine("Skipped: $skippedCount")
+        builder.appendLine("----------------------------------------")
+        
+        if (contactResults.isNotEmpty()) {
+            builder.appendLine("Per-contact summary:")
+            contactResults.forEach { result ->
+                val statusEmoji = when (result.status) {
+                    com.wireautomessenger.model.ContactStatus.SENT -> "✓"
+                    com.wireautomessenger.model.ContactStatus.FAILED -> "✗"
+                    com.wireautomessenger.model.ContactStatus.SKIPPED -> "⊘"
+                }
+                builder.append("#${result.position} $statusEmoji ${result.name}")
+                result.errorMessage?.let { builder.append(" — $it") }
+                builder.appendLine()
+            }
+        } else {
+            builder.appendLine("No contact results available.")
+        }
+        
+        builder.appendLine("----------------------------------------")
+        builder.appendLine("Need help? Copy this report along with the debug log (Menu → Debug Log → Copy) and share it.")
+        return builder.toString()
+    }
+    
     /**
      * Get debug log from SharedPreferences
      */
@@ -293,6 +357,8 @@ class WireAutomationService : AccessibilityService() {
     private suspend fun sendMessagesToAllContacts() {
         // Clear previous debug log at start of new session
         clearDebugLog()
+        clearOperationReport()
+        sessionStartTime = System.currentTimeMillis()
         debugLog("EVENT", "=== STARTING NEW BROADCAST MESSAGE SESSION ===")
         debugLog("STATE", "Initial state - isRunning: ${isRunning.get()}, isWireOpened: ${isWireOpened.get()}, isSendingInProgress: ${isSendingInProgress.get()}")
         
@@ -719,14 +785,32 @@ class WireAutomationService : AccessibilityService() {
         updateNotification("Verifying navigation...")
         sendProgressBroadcast("Verifying navigation...")
         debugLog("NAVIGATION", "Refreshing root node after navigation...")
-        rootNode = getRootWithRetry(maxRetries = 3, delayMs = 500)
+        rootNode = getRootWithRetry(maxRetries = 5, delayMs = 1000)
         if (rootNode == null) {
-            android.util.Log.e("WireAuto", "Could not get root node after navigation")
-            debugLog("ERROR", "Could not get root node after navigation - saving debug log")
-            saveDebugLogToPrefs()
-            sendErrorBroadcast("Lost access to Wire app. Please try again.")
-            resetState()
-            return
+            android.util.Log.e("WireAuto", "Could not get root node after navigation, trying to recover...")
+            debugLog("ERROR", "Could not get root node after navigation - attempting recovery")
+            
+            // Try one more time with longer wait and Wire launch
+            delay(2000)
+            if (!ensureWireInForeground()) {
+                android.util.Log.e("WireAuto", "Could not recover Wire app access")
+                debugLog("ERROR", "Could not recover Wire app access - saving debug log")
+                saveDebugLogToPrefs()
+                sendErrorBroadcast("Lost access to Wire app. Please ensure Wire is open and try again.")
+                resetState()
+                return
+            }
+            
+            // Try to get root again after recovery
+            rootNode = getRootWithRetry(maxRetries = 3, delayMs = 1000)
+            if (rootNode == null) {
+                android.util.Log.e("WireAuto", "Still could not get root node after recovery")
+                debugLog("ERROR", "Still could not get root node after recovery - saving debug log")
+                saveDebugLogToPrefs()
+                sendErrorBroadcast("Lost access to Wire app. Please ensure Wire is open and accessibility service is enabled.")
+                resetState()
+                return
+            }
         }
         debugLog("NAVIGATION", "Successfully got root node after navigation")
         
@@ -832,9 +916,20 @@ class WireAutomationService : AccessibilityService() {
         // NEW APPROACH: Find RecyclerView and identify actual conversation row items
         // Filter out UI elements like search bars, headers, FAB buttons
         if (rootNode == null) {
-            android.util.Log.e("WireAuto", "Root node is null, cannot find RecyclerView")
-            sendErrorBroadcast("Lost access to Wire app. Please try again.")
-            return
+            android.util.Log.e("WireAuto", "Root node is null, cannot find RecyclerView - attempting recovery...")
+            // Try to recover access
+            if (!ensureWireInForeground()) {
+                android.util.Log.e("WireAuto", "Could not recover Wire app access")
+                sendErrorBroadcast("Lost access to Wire app. Please ensure Wire is open and try again.")
+                return
+            }
+            // Try to get root again
+            rootNode = getRootWithRetry(maxRetries = 3, delayMs = 1000)
+            if (rootNode == null) {
+                android.util.Log.e("WireAuto", "Still could not get root node after recovery")
+                sendErrorBroadcast("Lost access to Wire app. Please ensure Wire is open and accessibility service is enabled.")
+                return
+            }
         }
         val recyclerView = findRecyclerView(rootNode!!)
         val rowItems = if (recyclerView != null) {
@@ -1921,6 +2016,11 @@ class WireAutomationService : AccessibilityService() {
         // Save debug log to SharedPreferences for retrieval
         saveDebugLogToPrefs()
         debugLog("EVENT", "Debug log saved to SharedPreferences for retrieval")
+        
+        // Save structured operation report for easy sharing
+        val duration = System.currentTimeMillis() - sessionStartTime
+        val operationReport = buildOperationReport(totalContacts, contactsProcessed, contactsSent, contactResults, duration)
+        saveOperationReport(operationReport)
 
         // Save last send time and completion status
         prefs.edit()
@@ -2581,51 +2681,127 @@ class WireAutomationService : AccessibilityService() {
     }
     
     /**
-     * PERSISTENT ROOT NODE: Retry getting rootInActiveWindow at least 3 times with 500ms delay
-     * Includes global action refresh when root is null
+     * PERSISTENT ROOT NODE: Retry getting rootInActiveWindow with multiple strategies
+     * Uses alternative methods if rootInActiveWindow fails
      */
-    private suspend fun getRootWithRetry(maxRetries: Int = 3, delayMs: Long = 500): AccessibilityNodeInfo? {
+    private suspend fun getRootWithRetry(maxRetries: Int = 5, delayMs: Long = 500): AccessibilityNodeInfo? {
         for (attempt in 1..maxRetries) {
             var root = rootInActiveWindow
             
-            // GLOBAL ACTION REFRESH: If root is null, perform a dummy action to refresh window content
+            // If root is null, try alternative methods
             if (root == null) {
-                android.util.Log.d("WireAuto", "Root is null on attempt $attempt, performing global action refresh...")
-                try {
-                    // Use GLOBAL_ACTION_TAKE_SCREENSHOT as a dummy trigger to refresh window content
-                    // This doesn't actually take a screenshot but forces the system to refresh
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT)
-                    } else {
-                        // Fallback: perform a small scroll gesture or back action
-                        performGlobalAction(GLOBAL_ACTION_BACK)
-                        delay(100)
-                        performGlobalAction(GLOBAL_ACTION_BACK) // Go back forward
+                android.util.Log.d("WireAuto", "Root is null on attempt $attempt/$maxRetries, trying alternative methods...")
+                
+                // Method 1: Try to get windows list (for Android 7.0+)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    try {
+                        val windows = windows
+                        if (windows != null && windows.isNotEmpty()) {
+                            // Get the top window (most recent)
+                            for (i in windows.size - 1 downTo 0) {
+                                val window = windows[i]
+                                if (window != null && window.root != null) {
+                                    val windowRoot = window.root
+                                    if (windowRoot != null && windowRoot.packageName == WIRE_PACKAGE) {
+                                        android.util.Log.d("WireAuto", "Found Wire window via windows list")
+                                        root = windowRoot
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.w("WireAuto", "Failed to get windows list: ${e.message}")
                     }
-                    delay(300) // Wait for refresh
-                    root = rootInActiveWindow
-                } catch (e: Exception) {
-                    android.util.Log.w("WireAuto", "Global action refresh failed: ${e.message}")
+                }
+                
+                // Method 2: Try to refresh by performing a harmless action
+                if (root == null && attempt <= 2) {
+                    try {
+                        // Try to refresh the window by performing a harmless action
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        delay(200)
+                        root = rootInActiveWindow
+                    } catch (e: Exception) {
+                        android.util.Log.w("WireAuto", "Global action refresh failed: ${e.message}")
+                    }
+                }
+                
+                // Method 3: Try to launch Wire app if we can't get root
+                if (root == null && attempt >= 3) {
+                    try {
+                        android.util.Log.d("WireAuto", "Attempting to launch Wire app to get root access...")
+                        val wireIntent = packageManager.getLaunchIntentForPackage(WIRE_PACKAGE)
+                        if (wireIntent != null) {
+                            wireIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            wireIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                            startActivity(wireIntent)
+                            delay(2000) // Wait for Wire to open
+                            root = rootInActiveWindow
+                            
+                            // Try windows list again after launch
+                            if (root == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                                try {
+                                    val windows = windows
+                                    if (windows != null && windows.isNotEmpty()) {
+                                        for (i in windows.size - 1 downTo 0) {
+                                            val window = windows[i]
+                                            if (window != null && window.root != null) {
+                                                val windowRoot = window.root
+                                                if (windowRoot != null && windowRoot.packageName == WIRE_PACKAGE) {
+                                                    android.util.Log.d("WireAuto", "Found Wire window after launch")
+                                                    root = windowRoot
+                                                    break
+                                                }
+                                            }
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    android.util.Log.w("WireAuto", "Failed to get windows after launch: ${e.message}")
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("WireAuto", "Failed to launch Wire: ${e.message}")
+                    }
                 }
             }
             
-            // PACKAGE VERIFICATION: Explicitly verify package name matches Wire
+            // If we got a root, verify it's from Wire package
             if (root != null) {
                 val packageName = root.packageName?.toString()
                 if (packageName == WIRE_PACKAGE) {
-                    android.util.Log.d("WireAuto", "Successfully got root node on attempt $attempt - verified package: $packageName")
+                    android.util.Log.d("WireAuto", "Successfully got Wire root node on attempt $attempt")
                     return root
                 } else {
-                    android.util.Log.d("WireAuto", "Root node has wrong package: $packageName (expected: $WIRE_PACKAGE)")
+                    android.util.Log.d("WireAuto", "Got root but wrong package: $packageName, expected: $WIRE_PACKAGE")
+                    // If it's not Wire, try to launch Wire
+                    if (attempt >= 2) {
+                        try {
+                            val wireIntent = packageManager.getLaunchIntentForPackage(WIRE_PACKAGE)
+                            if (wireIntent != null) {
+                                wireIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                startActivity(wireIntent)
+                                delay(2000)
+                                root = rootInActiveWindow
+                                if (root != null && root.packageName == WIRE_PACKAGE) {
+                                    return root
+                                }
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("WireAuto", "Failed to launch Wire: ${e.message}")
+                        }
+                    }
                 }
             }
             
+            // Wait before next attempt
             if (attempt < maxRetries) {
-                android.util.Log.d("WireAuto", "Root node is null or wrong package on attempt $attempt, retrying in ${delayMs}ms...")
                 delay(delayMs)
             }
         }
-        android.util.Log.w("WireAuto", "Failed to get root node after $maxRetries attempts")
+        
+        android.util.Log.w("WireAuto", "Failed to get Wire root node after $maxRetries attempts")
         return null
     }
     
@@ -3893,6 +4069,17 @@ class WireAutomationService : AccessibilityService() {
     
     private fun sendErrorBroadcast(errorMessage: String) {
         try {
+            saveDebugLogToPrefs()
+            val failureReport = buildString {
+                appendLine("Wire Auto Messenger Broadcast Report")
+                appendLine("Status: FAILED")
+                appendLine("Time: ${dateFormat.format(Date())}")
+                appendLine("----------------------------------------")
+                appendLine(errorMessage.trim())
+                appendLine()
+                appendLine("Tip: Copy the debug log (Menu → Debug Log → Copy) and share it with support together with this report.")
+            }
+            saveOperationReport(failureReport)
             val intent = Intent(ACTION_ERROR).apply {
                 putExtra(EXTRA_ERROR_MESSAGE, errorMessage)
             }

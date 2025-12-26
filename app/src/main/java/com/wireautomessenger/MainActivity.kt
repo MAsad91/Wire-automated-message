@@ -969,7 +969,9 @@ class MainActivity : AppCompatActivity() {
         
         scrollView.addView(linearLayout)
         
-        MaterialAlertDialogBuilder(this, R.style.Theme_WireAutoMessenger_Dialog)
+        val report = getLastOperationReport()
+        
+        val builder = MaterialAlertDialogBuilder(this, R.style.Theme_WireAutoMessenger_Dialog)
             .setTitle("📊 Detailed Results")
             .setView(scrollView)
             .setPositiveButton("OK", null)
@@ -988,7 +990,17 @@ class MainActivity : AppCompatActivity() {
                 clipboard.setPrimaryClip(clip)
                 Toast.makeText(this, "Results copied to clipboard", Toast.LENGTH_SHORT).show()
             }
-            .show()
+        
+        if (report.isNotEmpty()) {
+            builder.setNegativeButton("Copy Debug Report") { _, _ ->
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                val clip = android.content.ClipData.newPlainText("Wire Broadcast Report", report)
+                clipboard.setPrimaryClip(clip)
+                Toast.makeText(this, "Debug report copied to clipboard", Toast.LENGTH_SHORT).show()
+            }
+        }
+        
+        builder.show()
     }
     
     private fun showDetailedErrorDialog(errorMessage: String) {
@@ -1041,6 +1053,15 @@ class MainActivity : AppCompatActivity() {
             prefs.getString("debug_log_full", "") ?: ""
         } catch (e: Exception) {
             android.util.Log.e("WireAuto", "Error retrieving debug log: ${e.message}")
+            ""
+        }
+    }
+    
+    private fun getLastOperationReport(): String {
+        return try {
+            prefs.getString("last_operation_report", "") ?: ""
+        } catch (e: Exception) {
+            android.util.Log.e("WireAuto", "Error retrieving operation report: ${e.message}")
             ""
         }
     }
