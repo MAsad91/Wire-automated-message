@@ -47,6 +47,12 @@ class WireAutomationService : AccessibilityService() {
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
     private val maxLogSize = 50000 // Max 50KB of logs to prevent memory issues
     private var sessionStartTime: Long = 0L
+    private val avatarClassKeywords = listOf(
+        "image", "avatar", "profile", "picture", "photo", "icon", "thumb", "initial", "circle", "contact"
+    )
+    private val avatarExactClassNames = setOf(
+        "H1.o0", "H1.O0", "H1.oo", "H10.o0"
+    )
 
     companion object {
         const val ACTION_SEND_MESSAGES = "com.wireautomessenger.SEND_MESSAGES"
@@ -1211,19 +1217,41 @@ class WireAutomationService : AccessibilityService() {
                 debugLog("ACTION", "STEP 4.${contactsProcessed}.1: Finding profile placeholder for contact at index $index: $contactName")
                 android.util.Log.i("WireAuto", "STEP 4.${contactsProcessed}.1: Finding profile placeholder for contact at index $index: $contactName")
                 
+                val rowBounds = android.graphics.Rect()
+                refreshedRowItem.getBoundsInScreen(rowBounds)
+                if (rowBounds.width() <= 0 || rowBounds.height() <= 0) {
+                    android.util.Log.w("WireAuto", "Invalid row bounds for contact row, cannot proceed")
+                    contactResults.add(com.wireautomessenger.model.ContactResult(
+                        name = contactName,
+                        status = com.wireautomessenger.model.ContactStatus.FAILED,
+                        errorMessage = "Invalid row bounds",
+                        position = index + 1
+                    ))
+                    sendContactUpdate(contactName, "failed", index + 1, "Invalid row bounds")
+                    continue
+                }
+                
                 // Find profile placeholder/avatar in the contact row
                 debugLog("SEARCH", "Searching for profile placeholder in row item")
                 val profilePlaceholder = findProfilePlaceholderInRow(refreshedRowItem)
                 debugLog("SEARCH", "Profile placeholder search result: ${if (profilePlaceholder != null) "FOUND" else "NOT FOUND"}")
+                if (profilePlaceholder == null) {
+                    val avatarCandidates = mutableListOf<AccessibilityNodeInfo>()
+                    findImageNodesInRow(refreshedRowItem, avatarCandidates)
+                    debugLog("SEARCH", "Avatar candidates identified: ${avatarCandidates.size}")
+                }
                 
                 val targetNode: AccessibilityNodeInfo
+                val targetLabel: String
                 if (profilePlaceholder != null) {
                     android.util.Log.i("WireAuto", "✓ Found profile placeholder/avatar for $contactName")
                     android.util.Log.d("WireAuto", "Profile placeholder: className=${profilePlaceholder.className}, clickable=${profilePlaceholder.isClickable}, bounds=${getBoundsString(profilePlaceholder)}")
                     targetNode = profilePlaceholder
+                    targetLabel = "profile-placeholder"
                 } else {
                     android.util.Log.w("WireAuto", "⚠️ Profile placeholder not found, falling back to clicking entire row for: $contactName")
                     targetNode = refreshedRowItem
+                    targetLabel = "contact-row"
                 }
                 
                 // Get bounds for gesture dispatch (most reliable method)
@@ -1247,7 +1275,7 @@ class WireAutomationService : AccessibilityService() {
                 
                 android.util.Log.d("WireAuto", "Target node bounds: left=${bounds.left}, top=${bounds.top}, right=${bounds.right}, bottom=${bounds.bottom}")
                 android.util.Log.d("WireAuto", "Click center: ($centerX, $centerY)")
-                debugLog("CLICK", "STEP 4.${contactsProcessed}.2: Attempting to click profile placeholder/contact for: $contactName")
+                debugLog("CLICK", "STEP 4.${contactsProcessed}.2: Attempting to click $targetLabel for: $contactName")
                 debugLog("CLICK", "Click target bounds: left=${bounds.left}, top=${bounds.top}, width=${bounds.width()}, height=${bounds.height()}")
                 debugLog("CLICK", "Click center coordinates: ($centerX, $centerY)")
                 android.util.Log.i("WireAuto", "STEP 4.${contactsProcessed}.2: Clicking profile placeholder/contact for: $contactName")
@@ -1255,42 +1283,12 @@ class WireAutomationService : AccessibilityService() {
                 // Try multiple click methods - prioritize gesture dispatch as it's most reliable
                 var clicked = false
                 
-                // Method 1: Use gesture dispatch (simulate touch) - MOST RELIABLE
-                debugLog("CLICK", "Method 1: Attempting gesture dispatch click at ($centerX, $centerY)")
-                try {
-                    val path = android.graphics.Path()
-                    path.moveTo(centerX, centerY)
-                    
-                    val stroke = android.accessibilityservice.GestureDescription.StrokeDescription(
-                        path, 0, 150 // 150ms tap
-                    )
-                    
-                    val gesture = android.accessibilityservice.GestureDescription.Builder()
-                        .addStroke(stroke)
-                        .build()
-                    
-                    var gestureCompleted = false
-                    clicked = dispatchGesture(gesture, object : android.accessibilityservice.AccessibilityService.GestureResultCallback() {
-                        override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) {
-                            gestureCompleted = true
-                            debugLog("CLICK", "Gesture dispatch completed successfully")
-                            android.util.Log.d("WireAuto", "Gesture completed successfully")
-                        }
-                        override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) {
-                            debugLog("WARN", "Gesture dispatch was cancelled")
-                            android.util.Log.w("WireAuto", "Gesture was cancelled")
-                        }
-                    }, null)
-                    
-                    debugLog("CLICK", "Method 1 - Gesture dispatch result: $clicked")
-                    android.util.Log.d("WireAuto", "Method 1 - Gesture dispatch on profile placeholder: $clicked")
-                    if (clicked) {
-                        debugLog("CLICK", "Waiting 800ms for gesture to complete and UI to respond")
-                        delay(800) // Wait for gesture to complete and UI to respond
-                    }
-                } catch (e: Exception) {
-                    debugLog("ERROR", "Gesture dispatch failed: ${e.message}", e)
-                    android.util.Log.e("WireAuto", "Gesture dispatch failed: ${e.message}")
+                // Method 1: Direct bounds gesture tap
+                if (!clicked) {
+                    clicked = clickBounds(bounds, targetLabel)
+                    debugLog("CLICK", "Method 1 - Direct bounds gesture result: $clicked")
+                    android.util.Log.d("WireAuto", "Method 1 - Direct gesture on $targetLabel: $clicked")
+                    if (clicked) delay(800)
                 }
                 
                 // Method 2: USE GESTURE DISPATCH FOR EVERYTHING - Use gesture dispatch instead of ACTION_CLICK
@@ -1330,6 +1328,24 @@ class WireAutomationService : AccessibilityService() {
                     android.util.Log.w("WireAuto", "Profile placeholder click failed, trying entire row as fallback")
                     clicked = clickNodeWithGesture(refreshedRowItem)
                     android.util.Log.d("WireAuto", "Method 4 - Gesture dispatch on entire row (fallback): $clicked")
+                    if (clicked) delay(500)
+                }
+                
+                // Method 5: Click left region (avatar zone) by coordinates
+                if (!clicked) {
+                    val leftRegion = android.graphics.Rect(rowBounds)
+                    leftRegion.right = rowBounds.left + (rowBounds.width() * 0.35).toInt()
+                    if (leftRegion.width() > 0) {
+                        android.util.Log.w("WireAuto", "Attempting left-region fallback for $contactName")
+                        clicked = clickBounds(leftRegion, "row-left-region")
+                        if (clicked) delay(500)
+                    }
+                }
+                
+                // Method 6: Click center of entire row by coordinates
+                if (!clicked) {
+                    android.util.Log.w("WireAuto", "Attempting row-center fallback for $contactName")
+                    clicked = clickBounds(rowBounds, "row-center-region")
                     if (clicked) delay(500)
                 }
                 
@@ -2400,17 +2416,38 @@ class WireAutomationService : AccessibilityService() {
         if (depth > 10) return // Prevent infinite recursion
         
         val className = node.className?.toString() ?: ""
+        val classLower = className.lowercase(Locale.getDefault())
+        val descLower = node.contentDescription?.toString()?.lowercase(Locale.getDefault()) ?: ""
+        val viewIdLower = node.viewIdResourceName?.lowercase(Locale.getDefault()) ?: ""
         
-        // Check if this is an ImageView or ImageButton
-        if (className.contains("ImageView", ignoreCase = true) || 
-            className.contains("ImageButton", ignoreCase = true) ||
-            className.contains("Image", ignoreCase = true)) {
-            // Verify it has valid bounds
-            val bounds = android.graphics.Rect()
-            node.getBoundsInScreen(bounds)
-            if (bounds.width() > 0 && bounds.height() > 0) {
-                result.add(node)
-            }
+        val bounds = android.graphics.Rect()
+        node.getBoundsInScreen(bounds)
+        val width = bounds.width()
+        val height = bounds.height()
+        val aspectRatio = if (height > 0) width.toFloat() / height.toFloat() else 0f
+        val roughlySquare = height > 0 && kotlin.math.abs(width - height) <= height * 0.4
+        val reasonableSize = width in 30..250 && height in 30..250
+        val verySmallText = (node.text?.toString()?.trim()?.length ?: 0) in 1..2
+        val hasNoChildren = node.childCount <= 1
+        
+        val keywordMatch = avatarClassKeywords.any { keyword ->
+            classLower.contains(keyword) || descLower.contains(keyword) || viewIdLower.contains(keyword)
+        }
+        val exactMatch = avatarExactClassNames.any { className.equals(it, ignoreCase = true) }
+        
+        val looksLikeAvatar = (
+                keywordMatch ||
+                exactMatch ||
+                (roughlySquare && reasonableSize && hasNoChildren) ||
+                (verySmallText && reasonableSize)
+        ) && width > 0 && height > 0
+        
+        if (looksLikeAvatar) {
+            android.util.Log.d(
+                "WireAuto",
+                "Avatar candidate: class=$className, desc='${node.contentDescription}', bounds=($width x $height), text='${node.text}'"
+            )
+            result.add(node)
         }
         
         // Recursively search children
@@ -2904,6 +2941,43 @@ class WireAutomationService : AccessibilityService() {
         } catch (e: Exception) {
             android.util.Log.e("WireAuto", "Gesture click failed: ${e.message}")
             return false
+        }
+    }
+    
+    private fun clickBounds(bounds: android.graphics.Rect, label: String): Boolean {
+        if (bounds.width() <= 0 || bounds.height() <= 0) {
+            android.util.Log.w("WireAuto", "Invalid bounds for $label: $bounds")
+            return false
+        }
+        val centerX = bounds.centerX().toFloat()
+        val centerY = bounds.centerY().toFloat()
+        android.util.Log.d("WireAuto", "Attempting gesture click on $label at ($centerX, $centerY)")
+        return clickAtCoordinates(centerX, centerY, label)
+    }
+    
+    private fun clickAtCoordinates(centerX: Float, centerY: Float, label: String): Boolean {
+        return try {
+            val path = android.graphics.Path().apply {
+                moveTo(centerX, centerY)
+            }
+            val stroke = android.accessibilityservice.GestureDescription.StrokeDescription(
+                path, 0, 200
+            )
+            val gesture = android.accessibilityservice.GestureDescription.Builder()
+                .addStroke(stroke)
+                .build()
+            
+            dispatchGesture(gesture, object : android.accessibilityservice.AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                    android.util.Log.d("WireAuto", "Gesture click completed for $label")
+                }
+                override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                    android.util.Log.w("WireAuto", "Gesture click cancelled for $label")
+                }
+            }, null)
+        } catch (e: Exception) {
+            android.util.Log.e("WireAuto", "Gesture click failed for $label: ${e.message}")
+            false
         }
     }
     
