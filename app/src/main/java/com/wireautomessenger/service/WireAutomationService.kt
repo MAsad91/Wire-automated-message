@@ -878,35 +878,36 @@ class WireAutomationService : AccessibilityService() {
                     val inputBounds = android.graphics.Rect()
                     messageInput.getBoundsInScreen(inputBounds)
                     val screenBounds = android.graphics.Rect()
-                    currentRoot?.getBoundsInScreen(screenBounds) ?: run {
+                    if (currentRoot == null) {
                         android.util.Log.w("WireAuto", "Current root is null, cannot check keyboard blocking")
-                        return@try
-                    }
-                    
-                    // Check if input is in bottom 30% of screen (likely blocked by keyboard)
-                    val screenHeight = screenBounds.height()
-                    val inputBottom = inputBounds.bottom
-                    val bottomThreshold = screenHeight * 0.7
-                    
-                    if (inputBottom > bottomThreshold) {
-                        android.util.Log.d("WireAuto", "Message input may be blocked by keyboard, attempting to scroll...")
-                        // Try to scroll the message input into view
-                        if (messageInput.isScrollable) {
-                            messageInput.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
-                            delay(500)
-                        } else {
-                            // Find scrollable parent and scroll
-                            var parent = messageInput.parent
-                            var depth = 0
-                            while (parent != null && depth < 5) {
-                                if (parent.isScrollable) {
-                                    parent.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
-                                    delay(500)
-                                    android.util.Log.d("WireAuto", "Scrolled parent at depth $depth to reveal input")
-                                    break
+                    } else {
+                        currentRoot.getBoundsInScreen(screenBounds)
+                        
+                        // Check if input is in bottom 30% of screen (likely blocked by keyboard)
+                        val screenHeight = screenBounds.height()
+                        val inputBottom = inputBounds.bottom
+                        val bottomThreshold = screenHeight * 0.7
+                        
+                        if (inputBottom > bottomThreshold) {
+                            android.util.Log.d("WireAuto", "Message input may be blocked by keyboard, attempting to scroll...")
+                            // Try to scroll the message input into view
+                            if (messageInput.isScrollable) {
+                                messageInput.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                                delay(500)
+                            } else {
+                                // Find scrollable parent and scroll
+                                var parent = messageInput.parent
+                                var depth = 0
+                                while (parent != null && depth < 5) {
+                                    if (parent.isScrollable) {
+                                        parent.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                                        delay(500)
+                                        android.util.Log.d("WireAuto", "Scrolled parent at depth $depth to reveal input")
+                                        break
+                                    }
+                                    parent = parent.parent
+                                    depth++
                                 }
-                                parent = parent.parent
-                                depth++
                             }
                         }
                     }
