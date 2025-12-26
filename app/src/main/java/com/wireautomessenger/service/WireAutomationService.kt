@@ -293,7 +293,7 @@ class WireAutomationService : AccessibilityService() {
         updateNotification("Waiting for Wire app to load...")
         sendProgressBroadcast("Waiting for Wire app to load...")
         android.util.Log.i("WireAuto", "Waiting for Wire app UI to stabilize...")
-        delay(3000) // Give Wire time to fully load
+        delay(3000) // Increased to 3 seconds to allow slow UI rendering to finish
 
         // Ensure we're in Wire app - check package name (NO relaunch)
         var rootNode = rootInActiveWindow
@@ -307,11 +307,53 @@ class WireAutomationService : AccessibilityService() {
                 return
             }
         }
-        
+
         android.util.Log.i("WireAuto", "Wire app is accessible - package: ${rootNode.packageName}")
+
+        // EXPLICIT FOCUS: Perform a small scroll or global action to refresh accessibility node tree
+        android.util.Log.d("WireAuto", "Refreshing accessibility tree with global action...")
+        try {
+            // Try a small scroll action to refresh the tree
+            val scrollableView = findScrollableView(rootNode)
+            if (scrollableView != null && scrollableView.isScrollable) {
+                scrollableView.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                delay(500)
+                android.util.Log.d("WireAuto", "Performed scroll to refresh accessibility tree")
+            } else {
+                // Fallback: perform a global action to refresh
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                delay(300)
+                performGlobalAction(GLOBAL_ACTION_BACK) // Go back forward if we went back
+                delay(300)
+                android.util.Log.d("WireAuto", "Performed global action to refresh accessibility tree")
+            }
+            // Refresh root after action
+            rootNode = rootInActiveWindow
+        } catch (e: Exception) {
+            android.util.Log.w("WireAuto", "Could not refresh accessibility tree: ${e.message}")
+        }
 
         updateNotification("Navigating to conversations...")
         sendProgressBroadcast("Navigating to conversations...")
+        
+        // UI INTERACTION FIX: Search for "Search conversations" bar as starting point if main list fails
+        val searchBar = findSearchConversationsBar(rootNode)
+        if (searchBar != null) {
+            android.util.Log.d("WireAuto", "Found 'Search conversations' bar - using as reference point")
+            // Click on search bar to ensure we're on the right screen
+            try {
+                if (searchBar.isClickable) {
+                    searchBar.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    delay(500)
+                    // Dismiss search if it opened
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    delay(500)
+                }
+            } catch (e: Exception) {
+                android.util.Log.d("WireAuto", "Could not interact with search bar: ${e.message}")
+            }
+            rootNode = rootInActiveWindow
+        }
         
         // Try to navigate to conversations/contacts list
         // Wire typically shows conversations by default, but we need to ensure we're on the right screen
@@ -375,8 +417,9 @@ class WireAutomationService : AccessibilityService() {
             }
             
             if (contactItems.isEmpty()) {
-                // Collect debug info about what we found
+                // Collect debug info about what we found, including class names
                 val debugInfo = collectDebugInfo(rootNode)
+                val classNamesInfo = collectClassNamesInfo(rootNode)
                 
                 val errorMsg = "No contacts found in Wire app.\n\n" +
                         "📋 Troubleshooting Steps:\n\n" +
@@ -389,7 +432,9 @@ class WireAutomationService : AccessibilityService() {
                         "- You need active conversations with contacts\n" +
                         "- Try scrolling in Wire to load all conversations\n\n" +
                         "🔍 Debug Info:\n" +
-                        debugInfo
+                        debugInfo + "\n\n" +
+                        "📦 Found Elements (Class Names):\n" +
+                        classNamesInfo
                 
                 updateNotification("No contacts found - see details in app")
                 sendErrorBroadcast(errorMsg)
@@ -678,6 +723,32 @@ class WireAutomationService : AccessibilityService() {
                     clicked = refreshedRowItem.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                     android.util.Log.d("WireAuto", "Method 2 - Direct click on row: $clicked")
                     if (clicked) delay(500)
+                }
+                
+                // Method 2.5: FORCE CLICK - If ACTION_CLICK fails, try clicking center coordinates
+                if (!clicked) {
+                    try {
+                        val forceClickPath = android.graphics.Path()
+                        forceClickPath.moveTo(centerX, centerY)
+                        val forceClickStroke = android.accessibilityservice.GestureDescription.StrokeDescription(
+                            forceClickPath, 0, 200 // 200ms tap
+                        )
+                        val forceClickGesture = android.accessibilityservice.GestureDescription.Builder()
+                            .addStroke(forceClickStroke)
+                            .build()
+                        clicked = dispatchGesture(forceClickGesture, object : android.accessibilityservice.AccessibilityService.GestureResultCallback() {
+                            override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                                android.util.Log.d("WireAuto", "Force click gesture completed")
+                            }
+                            override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                                android.util.Log.w("WireAuto", "Force click gesture cancelled")
+                            }
+                        }, null)
+                        android.util.Log.d("WireAuto", "Method 2.5 - Force click at center coordinates: $clicked")
+                        if (clicked) delay(500)
+                    } catch (e: Exception) {
+                        android.util.Log.e("WireAuto", "Force click failed: ${e.message}")
+                    }
                 }
                 
                 // Method 3: Find and click any clickable child in the row
@@ -1737,6 +1808,87 @@ class WireAutomationService : AccessibilityService() {
         android.util.Log.d("WireAuto", "Conversations button not found, assuming already on conversations screen")
     }
     
+    /**
+     * Find the "Search conversations" bar as a reference point
+     * This helps identify if we're on the right screen
+     */
+    private fun findSearchConversationsBar(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val allEditTexts = mutableListOf<AccessibilityNodeInfo>()
+        findAllNodesByClassName(root, "android.widget.EditText", allEditTexts)
+        findAllNodesByClassName(root, "androidx.appcompat.widget.AppCompatEditText", allEditTexts)
+        
+        for (editText in allEditTexts) {
+            val hint = editText.hintText?.toString()?.trim() ?: ""
+            val contentDesc = editText.contentDescription?.toString()?.trim() ?: ""
+            val text = editText.text?.toString()?.trim() ?: ""
+            
+            // Look for "Search conversations" or similar
+            if (hint.lowercase().contains("search") && 
+                (hint.lowercase().contains("conversation") || hint.lowercase().contains("chat") || hint.lowercase().contains("message"))) {
+                android.util.Log.d("WireAuto", "Found search conversations bar: hint='$hint'")
+                return editText
+            }
+            
+            if (contentDesc.lowercase().contains("search") && 
+                (contentDesc.lowercase().contains("conversation") || contentDesc.lowercase().contains("chat"))) {
+                android.util.Log.d("WireAuto", "Found search conversations bar: contentDesc='$contentDesc'")
+                return editText
+            }
+        }
+        
+        return null
+    }
+    
+    /**
+     * Collect class names of all found elements for debugging
+     */
+    private fun collectClassNamesInfo(root: AccessibilityNodeInfo): String {
+        val classNames = mutableSetOf<String>()
+        val classNamesWithCount = mutableMapOf<String, Int>()
+        
+        collectClassNamesRecursive(root, classNames, classNamesWithCount, 0, 50) // Limit to 50 elements
+        
+        val info = StringBuilder()
+        if (classNamesWithCount.isNotEmpty()) {
+            // Sort by count (most common first)
+            val sorted = classNamesWithCount.toList().sortedByDescending { it.second }
+            sorted.take(20).forEach { (className, count) ->
+                info.append("- $className (found $count times)\n")
+            }
+        } else if (classNames.isNotEmpty()) {
+            classNames.take(20).forEach { className ->
+                info.append("- $className\n")
+            }
+        } else {
+            info.append("- No elements found\n")
+        }
+        
+        return info.toString()
+    }
+    
+    private fun collectClassNamesRecursive(
+        node: AccessibilityNodeInfo, 
+        classNames: MutableSet<String>,
+        classNamesWithCount: MutableMap<String, Int>,
+        depth: Int, 
+        maxElements: Int
+    ) {
+        if (depth > 5 || classNamesWithCount.size > maxElements) return
+        
+        if (node.packageName == WIRE_PACKAGE) {
+            val className = node.className?.toString() ?: "Unknown"
+            classNames.add(className)
+            classNamesWithCount[className] = (classNamesWithCount[className] ?: 0) + 1
+        }
+        
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i)
+            if (child != null) {
+                collectClassNamesRecursive(child, classNames, classNamesWithCount, depth + 1, maxElements)
+            }
+        }
+    }
+    
     private fun findScrollableView(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         // Look for RecyclerView, ListView, or ScrollView
         val className = root.className?.toString() ?: ""
@@ -2521,28 +2673,6 @@ class WireAutomationService : AccessibilityService() {
             return false
         }
         
-        // Exclude empty layout nodes (no text, no meaningful content)
-        val hasText = text.isNotEmpty()
-        val hasContentDesc = contentDesc.isNotEmpty()
-        if (!hasText && !hasContentDesc) {
-            // Check if any child has text
-            var hasChildWithText = false
-            for (i in 0 until node.childCount) {
-                val child = node.getChild(i)
-                if (child != null) {
-                    val childText = child.text?.toString()?.trim() ?: ""
-                    val childDesc = child.contentDescription?.toString()?.trim() ?: ""
-                    if (childText.isNotEmpty() || childDesc.isNotEmpty()) {
-                        hasChildWithText = true
-                        break
-                    }
-                }
-            }
-            if (!hasChildWithText) {
-                return false // Empty layout node
-            }
-        }
-        
         // Exclude items that are too small (likely not conversation rows)
         val bounds = android.graphics.Rect()
         node.getBoundsInScreen(bounds)
@@ -2550,13 +2680,47 @@ class WireAutomationService : AccessibilityService() {
             return false
         }
         
-        // A conversation row should:
-        // - Have text content (contact name or message preview) - either directly or in children
-        // - Be clickable or have clickable parent
-        // - Have multiple children (avatar, name, message, etc.) OR have meaningful text itself
-        val hasMultipleChildren = node.childCount >= 2
+        // BROADENED SEARCH: Look for ViewGroup or RelativeLayout that contains TextView with person's name
+        val isViewGroup = className.contains("ViewGroup", ignoreCase = true) ||
+                         className.contains("RelativeLayout", ignoreCase = true) ||
+                         className.contains("LinearLayout", ignoreCase = true) ||
+                         className.contains("ConstraintLayout", ignoreCase = true) ||
+                         className.contains("FrameLayout", ignoreCase = true) ||
+                         className.contains("CardView", ignoreCase = true)
         
-        // Check if node or any child has meaningful text (contact name)
+        // Check if this is a container with TextView containing person's name
+        if (isViewGroup) {
+            // Look for TextView children with person's name (not UI labels)
+            var hasPersonName = false
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i)
+                if (child != null) {
+                    val childClassName = child.className?.toString() ?: ""
+                    val childText = child.text?.toString()?.trim() ?: ""
+                    
+                    // Check if child is a TextView with meaningful text (person's name)
+                    if (childClassName.contains("TextView", ignoreCase = true) && 
+                        childText.length >= 2 &&
+                        !childText.lowercase().contains("search") &&
+                        !childText.lowercase().contains("new") &&
+                        childText != "CONVERSATIONS" && childText != "CHATS" &&
+                        !childText.all { it.isLetter() && it.isUpperCase() && childText.length < 15 }) {
+                        hasPersonName = true
+                        break
+                    }
+                }
+            }
+            
+            // If it's a ViewGroup/RelativeLayout with person's name and is clickable, it's likely a conversation row
+            if (hasPersonName) {
+                val isClickable = node.isClickable || findClickableNode(node) != null
+                if (isClickable) {
+                    return true
+                }
+            }
+        }
+        
+        // Original logic: Check if node or any child has meaningful text (contact name)
         var hasMeaningfulText = hasText && text.length >= 2
         if (!hasMeaningfulText) {
             // Check children for meaningful text
@@ -2575,6 +2739,7 @@ class WireAutomationService : AccessibilityService() {
             }
         }
         
+        val hasMultipleChildren = node.childCount >= 2
         val isClickable = node.isClickable || findClickableNode(node) != null
         
         // Must have meaningful text and be clickable
