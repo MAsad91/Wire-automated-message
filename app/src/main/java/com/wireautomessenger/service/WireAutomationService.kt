@@ -612,6 +612,7 @@ class WireAutomationService : AccessibilityService() {
                     android.util.Log.w("WireAuto", "Could not refresh row item, using original (may be stale)")
                 }
                 
+                android.util.Log.d("WireAuto", "Clicking Contact: $contactName")
                 android.util.Log.i("WireAuto", "STEP 4.${contactsProcessed}.1: Attempting to click contact row at index $index: $contactName")
                 android.util.Log.d("WireAuto", "Row item: clickable=${refreshedRowItem.isClickable}, className=${refreshedRowItem.className}")
                 
@@ -739,9 +740,12 @@ class WireAutomationService : AccessibilityService() {
                     continue
                 }
                 
+                android.util.Log.d("WireAuto", "Contact Found: $contactName")
                 android.util.Log.i("WireAuto", "STEP 4.${contactsProcessed}.2: Waiting for conversation to open...")
-                delay(3000) // Wait for conversation to open
-
+                
+                // Add 2-second delay after opening contact's chat to allow UI to load
+                delay(2000)
+                
                 // Verify we're in conversation view - try multiple times (NO relaunch)
                 currentRoot = rootInActiveWindow
                 var attempts = 0
@@ -805,6 +809,44 @@ class WireAutomationService : AccessibilityService() {
 
                 android.util.Log.i("WireAuto", "STEP 4.${contactsProcessed}.3: Found message input, preparing to type message...")
 
+                // Handle keyboard blocking - scroll if needed
+                try {
+                    val inputBounds = android.graphics.Rect()
+                    messageInput.getBoundsInScreen(inputBounds)
+                    val screenBounds = android.graphics.Rect()
+                    currentRoot.getBoundsInScreen(screenBounds)
+                    
+                    // Check if input is in bottom 30% of screen (likely blocked by keyboard)
+                    val screenHeight = screenBounds.height()
+                    val inputBottom = inputBounds.bottom
+                    val bottomThreshold = screenHeight * 0.7
+                    
+                    if (inputBottom > bottomThreshold) {
+                        android.util.Log.d("WireAuto", "Message input may be blocked by keyboard, attempting to scroll...")
+                        // Try to scroll the message input into view
+                        if (messageInput.isScrollable) {
+                            messageInput.performAction(AccessibilityNodeInfo.ACTION_SCROLL_DOWN)
+                            delay(500)
+                        } else {
+                            // Find scrollable parent and scroll
+                            var parent = messageInput.parent
+                            var depth = 0
+                            while (parent != null && depth < 5) {
+                                if (parent.isScrollable) {
+                                    parent.performAction(AccessibilityNodeInfo.ACTION_SCROLL_DOWN)
+                                    delay(500)
+                                    android.util.Log.d("WireAuto", "Scrolled parent at depth $depth to reveal input")
+                                    break
+                                }
+                                parent = parent.parent
+                                depth++
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.d("WireAuto", "Could not handle keyboard blocking: ${e.message}")
+                }
+
                 // Focus on message input
                 try {
                     messageInput.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
@@ -825,6 +867,7 @@ class WireAutomationService : AccessibilityService() {
                 }
 
                 // Type message - use ACTION_SET_TEXT to set the entire message at once
+                android.util.Log.d("WireAuto", "Text Entered: $message")
                 android.util.Log.i("WireAuto", "STEP 4.${contactsProcessed}.4: Setting message text: $message")
                 val bundle = android.os.Bundle()
                 bundle.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, message)
@@ -975,9 +1018,12 @@ class WireAutomationService : AccessibilityService() {
                         // Step 2: Click send button - try multiple methods
                         var clicked = false
                         
-                        // Method 1: Direct click on clickable parent
+                        android.util.Log.d("WireAuto", "Send Clicked: Attempting to click send button")
+                        
+                        // Method 1: Direct click on clickable parent using ACTION_CLICK
                         if (sendButton.isClickable) {
                             clicked = sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                            android.util.Log.d("WireAuto", "Send Clicked: Method 1 - Direct ACTION_CLICK on send button: $clicked")
                             android.util.Log.i("WireAuto", "Method 1 - Direct click on send button: $clicked")
                             if (clicked) {
                                 val clickDelay = (1000..3000).random()
@@ -1140,7 +1186,7 @@ class WireAutomationService : AccessibilityService() {
                     // Check if we're still in conversation (message input exists)
                     val stillInConversation = findMessageInput(currentRoot) != null
                     if (stillInConversation) {
-                        android.util.Log.d("WireAuto", "Still in conversation, going back to contacts list...")
+                        android.util.Log.d("WireAuto", "Still in conversation, performing back gesture to return to contact list...")
                         performGlobalAction(GLOBAL_ACTION_BACK)
                         val backDelay = (2000..4000).random() // Random delay 2-4 seconds
                         android.util.Log.d("WireAuto", "Waiting ${backDelay}ms for navigation...")
@@ -1746,8 +1792,23 @@ class WireAutomationService : AccessibilityService() {
     }
 
     private fun findMessageInput(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        // Look for EditText or text input field, but exclude search boxes
-        // Search boxes typically have "Search" in their content description
+        android.util.Log.d("WireAuto", "=== Finding message input field ===")
+        
+        // Strategy 1: Find by specific view ID (com.witaletr.wire:id/message_input)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            try {
+                val viewIdNodes = root.findAccessibilityNodeInfosByViewId("com.witaletr.wire:id/message_input")
+                if (viewIdNodes != null && viewIdNodes.isNotEmpty()) {
+                    val inputNode = viewIdNodes[0]
+                    android.util.Log.d("WireAuto", "Message input found via ViewId: com.witaletr.wire:id/message_input")
+                    return inputNode
+                }
+            } catch (e: Exception) {
+                android.util.Log.d("WireAuto", "ViewId search failed: ${e.message}")
+            }
+        }
+        
+        // Strategy 2: Find by hint text "Type a message"
         val allEditTexts = mutableListOf<AccessibilityNodeInfo>()
         findAllNodesByClassName(root, "android.widget.EditText", allEditTexts)
         findAllNodesByClassName(root, "androidx.appcompat.widget.AppCompatEditText", allEditTexts)
@@ -1761,24 +1822,34 @@ class WireAutomationService : AccessibilityService() {
                 continue
             }
             
-            // Prefer message input fields
-            if (contentDesc.contains("message") || 
+            // Prefer message input fields with specific hint
+            if (hint.contains("type a message") || 
+                hint.contains("type a message", ignoreCase = true) ||
                 contentDesc.contains("type a message") ||
-                hint.contains("message") ||
-                hint.contains("type")) {
+                contentDesc.contains("type a message", ignoreCase = true)) {
+                android.util.Log.d("WireAuto", "Message input found via hint 'Type a message'")
+                return editText
+            }
+            
+            // Also check for general message hints
+            if (contentDesc.contains("message") || 
+                hint.contains("message")) {
+                android.util.Log.d("WireAuto", "Message input found via message hint")
                 return editText
             }
         }
         
-        // If no specific message input found, return first non-search EditText
+        // Strategy 3: If no specific message input found, return first non-search EditText
         for (editText in allEditTexts) {
             val contentDesc = editText.contentDescription?.toString()?.lowercase() ?: ""
             val hint = editText.hintText?.toString()?.lowercase() ?: ""
             if (!contentDesc.contains("search") && !hint.contains("search")) {
+                android.util.Log.d("WireAuto", "Message input found via fallback (first non-search EditText)")
                 return editText
             }
         }
         
+        android.util.Log.w("WireAuto", "Message input not found")
         return null
     }
     
@@ -1802,24 +1873,48 @@ class WireAutomationService : AccessibilityService() {
     private fun findSendButton(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         android.util.Log.d("WireAuto", "=== Finding send button using multiple strategies ===")
         
-        // Strategy 1: findAccessibilityNodeInfosByViewId (if available - Android 10+)
+        // Strategy 1: Find by specific view ID (com.witaletr.wire:id/send_button) - HIGHEST PRIORITY
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
             try {
-                val viewIdNodes = root.findAccessibilityNodeInfosByViewId("com.wire:id/send")
-                    ?: root.findAccessibilityNodeInfosByViewId("android:id/send")
-                    ?: root.findAccessibilityNodeInfosByViewId("send")
-                
+                val viewIdNodes = root.findAccessibilityNodeInfosByViewId("com.witaletr.wire:id/send_button")
                 if (viewIdNodes != null && viewIdNodes.isNotEmpty()) {
                     val sendNode = viewIdNodes[0]
-                    android.util.Log.i("WireAuto", "Send button found via ViewId: ${sendNode.viewIdResourceName}")
+                    android.util.Log.d("WireAuto", "Send button found via ViewId: com.witaletr.wire:id/send_button")
                     return getClickableParent(sendNode)
                 }
             } catch (e: Exception) {
-                android.util.Log.d("WireAuto", "ViewId search failed: ${e.message}")
+                android.util.Log.d("WireAuto", "ViewId search for send_button failed: ${e.message}")
             }
         }
         
-        // Strategy 2: findAccessibilityNodeInfosByText("Send")
+        // Strategy 2: Find by content description "Send" - SECOND PRIORITY
+        val contentDescNodes = findAllNodesByContentDescription(root, "send")
+        if (contentDescNodes.isNotEmpty()) {
+            // Filter for exact match "Send" (case-insensitive)
+            val exactMatch = contentDescNodes.firstOrNull { node ->
+                val desc = node.contentDescription?.toString()?.trim() ?: ""
+                desc.equals("send", ignoreCase = true)
+            }
+            if (exactMatch != null) {
+                android.util.Log.d("WireAuto", "Send button found via ContentDescription: 'Send'")
+                val clickableParent = getClickableParent(exactMatch)
+                if (clickableParent != null && clickableParent.isClickable) {
+                    return clickableParent
+                }
+                return clickableParent
+            }
+            // Fallback to any node containing "send" in description
+            android.util.Log.d("WireAuto", "Send button found via ContentDescription (contains 'send'): ${contentDescNodes.size} candidates")
+            for (node in contentDescNodes) {
+                val clickableParent = getClickableParent(node)
+                if (clickableParent != null && clickableParent.isClickable) {
+                    return clickableParent
+                }
+            }
+            return getClickableParent(contentDescNodes[0])
+        }
+        
+        // Strategy 3: findAccessibilityNodeInfosByText("Send")
         try {
             val textNodes = root.findAccessibilityNodeInfosByText("Send")
             if (textNodes != null && textNodes.isNotEmpty()) {
@@ -1827,28 +1922,13 @@ class WireAutomationService : AccessibilityService() {
                     val contentDesc = node.contentDescription?.toString()?.lowercase() ?: ""
                     val text = node.text?.toString()?.lowercase() ?: ""
                     if (contentDesc.contains("send") || text.contains("send")) {
-                        android.util.Log.i("WireAuto", "Send button found via Text: 'Send'")
+                        android.util.Log.d("WireAuto", "Send button found via Text: 'Send'")
                         return getClickableParent(node)
                     }
                 }
             }
         } catch (e: Exception) {
             android.util.Log.d("WireAuto", "Text search failed: ${e.message}")
-        }
-        
-        // Strategy 3: ContentDescription containing "send"
-        val contentDescNodes = findAllNodesByContentDescription(root, "send")
-        if (contentDescNodes.isNotEmpty()) {
-            android.util.Log.i("WireAuto", "Send button found via ContentDescription: ${contentDescNodes.size} candidates")
-            // Prefer clickable nodes or their clickable parents
-            for (node in contentDescNodes) {
-                val clickableParent = getClickableParent(node)
-                if (clickableParent != null && clickableParent.isClickable) {
-                    return clickableParent
-                }
-            }
-            // Return first node's clickable parent if any
-            return getClickableParent(contentDescNodes[0])
         }
         
         // Strategy 4: Find all ImageButton/Button nodes and filter for send button
@@ -1863,7 +1943,7 @@ class WireAutomationService : AccessibilityService() {
             if (contentDesc.contains("send") || 
                 text.contains("send") || 
                 viewId.contains("send")) {
-                android.util.Log.i("WireAuto", "Send button found via Button search: className=${button.className}")
+                android.util.Log.d("WireAuto", "Send button found via Button search: className=${button.className}")
                 return getClickableParent(button)
             }
         }
@@ -2396,14 +2476,21 @@ class WireAutomationService : AccessibilityService() {
         // - Search bars (contain "search" in text/content description)
         // - Section headers (like "CONVERSATIONS")
         // - FAB buttons (floating action buttons)
+        // - "New Message" buttons
         // - Toolbars, action bars
         // - Empty or very small items
+        // - Empty layout nodes
         
         val className = node.className?.toString() ?: ""
         val text = node.text?.toString()?.trim() ?: ""
         val contentDesc = node.contentDescription?.toString()?.trim() ?: ""
         val lowerText = text.lowercase()
         val lowerDesc = contentDesc.lowercase()
+        
+        // Must be in Wire package
+        if (node.packageName != WIRE_PACKAGE) {
+            return false
+        }
         
         // Exclude search bars
         if (lowerText.contains("search") || lowerDesc.contains("search") ||
@@ -2412,17 +2499,18 @@ class WireAutomationService : AccessibilityService() {
             return false
         }
         
-        // Exclude section headers
+        // Exclude section headers (all caps, short text)
         if (text == "CONVERSATIONS" || text == "CONVERSATION" || 
             text == "CHATS" || text == "MESSAGES" ||
-            (text.isNotEmpty() && text.all { it.isLetter() && it.isUpperCase() && text.length < 15 })) {
+            (text.isNotEmpty() && text.length < 20 && text.all { it.isLetter() && it.isUpperCase() })) {
             return false
         }
         
-        // Exclude FAB buttons
+        // Exclude FAB buttons and "New Message" buttons
         if (className.contains("FloatingActionButton", ignoreCase = true) ||
             lowerText == "new" || lowerDesc == "new" ||
-            (text == "New" && className.contains("Button", ignoreCase = true))) {
+            lowerText.contains("new message") || lowerDesc.contains("new message") ||
+            (text.contains("New") && className.contains("Button", ignoreCase = true))) {
             return false
         }
         
@@ -2433,27 +2521,64 @@ class WireAutomationService : AccessibilityService() {
             return false
         }
         
+        // Exclude empty layout nodes (no text, no meaningful content)
+        val hasText = text.isNotEmpty()
+        val hasContentDesc = contentDesc.isNotEmpty()
+        if (!hasText && !hasContentDesc) {
+            // Check if any child has text
+            var hasChildWithText = false
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i)
+                if (child != null) {
+                    val childText = child.text?.toString()?.trim() ?: ""
+                    val childDesc = child.contentDescription?.toString()?.trim() ?: ""
+                    if (childText.isNotEmpty() || childDesc.isNotEmpty()) {
+                        hasChildWithText = true
+                        break
+                    }
+                }
+            }
+            if (!hasChildWithText) {
+                return false // Empty layout node
+            }
+        }
+        
         // Exclude items that are too small (likely not conversation rows)
         val bounds = android.graphics.Rect()
         node.getBoundsInScreen(bounds)
-        if (bounds.height() < 50) { // Conversation rows are typically taller than 50px
+        if (bounds.height() < 50 || bounds.width() < 50) { // Conversation rows are typically taller/wider than 50px
             return false
         }
         
         // A conversation row should:
-        // - Have text content (contact name or message preview)
+        // - Have text content (contact name or message preview) - either directly or in children
         // - Be clickable or have clickable parent
-        // - Have multiple children (avatar, name, message, etc.)
-        val hasText = text.isNotEmpty() || contentDesc.isNotEmpty()
+        // - Have multiple children (avatar, name, message, etc.) OR have meaningful text itself
         val hasMultipleChildren = node.childCount >= 2
-        val isClickable = node.isClickable || findClickableNode(node) != null
         
-        // Must be in Wire package
-        if (node.packageName != WIRE_PACKAGE) {
-            return false
+        // Check if node or any child has meaningful text (contact name)
+        var hasMeaningfulText = hasText && text.length >= 2
+        if (!hasMeaningfulText) {
+            // Check children for meaningful text
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i)
+                if (child != null) {
+                    val childText = child.text?.toString()?.trim() ?: ""
+                    if (childText.length >= 2 && 
+                        !childText.lowercase().contains("search") &&
+                        !childText.lowercase().contains("new") &&
+                        childText != "CONVERSATIONS" && childText != "CHATS") {
+                        hasMeaningfulText = true
+                        break
+                    }
+                }
+            }
         }
         
-        return hasText && hasMultipleChildren && isClickable
+        val isClickable = node.isClickable || findClickableNode(node) != null
+        
+        // Must have meaningful text and be clickable
+        return hasMeaningfulText && isClickable && (hasMultipleChildren || hasText)
     }
     
     private fun findClickableContainersInRecyclerView(root: AccessibilityNodeInfo, result: MutableList<AccessibilityNodeInfo>) {
