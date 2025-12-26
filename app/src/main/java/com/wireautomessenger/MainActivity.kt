@@ -46,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvNextSend: TextView
     private lateinit var progressBar: ProgressBar
     private lateinit var llProgress: LinearLayout
+    private lateinit var toolbar: com.google.android.material.appbar.MaterialToolbar
 
     private val prefs by lazy {
         getSharedPreferences("WireAutoMessenger", Context.MODE_PRIVATE)
@@ -242,6 +243,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initViews() {
+        toolbar = findViewById(R.id.toolbar)
         etMessage = findViewById(R.id.etMessage)
         btnSendNow = findViewById(R.id.btnSendNow)
         btnEnableAccessibility = findViewById(R.id.btnEnableAccessibility)
@@ -251,6 +253,24 @@ class MainActivity : AppCompatActivity() {
         tvNextSend = findViewById(R.id.tvNextSend)
         progressBar = findViewById(R.id.progressBar)
         llProgress = findViewById(R.id.llProgress)
+        
+        // Set up toolbar menu
+        toolbar.inflateMenu(R.menu.main_menu)
+        toolbar.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                R.id.menu_debug_log -> {
+                    showDebugLogDialog()
+                    true
+                }
+                else -> false
+            }
+        }
+        
+        // Add long-press listener on status text to show debug log
+        tvStatus.setOnLongClickListener {
+            showDebugLogDialog()
+            true
+        }
     }
 
     private fun checkAccessibilityService() {
@@ -1003,9 +1023,88 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Error details copied to clipboard", Toast.LENGTH_SHORT).show()
                 resetSendingUI()
             }
+            .setNeutralButton("View Debug Log") { _, _ ->
+                showDebugLogDialog()
+            }
             .setCancelable(true)
             .setOnCancelListener {
                 resetSendingUI()
+            }
+            .show()
+    }
+    
+    /**
+     * Get debug log from SharedPreferences
+     */
+    private fun getDebugLogFromPrefs(): String {
+        return try {
+            prefs.getString("debug_log_full", "") ?: ""
+        } catch (e: Exception) {
+            android.util.Log.e("WireAuto", "Error retrieving debug log: ${e.message}")
+            ""
+        }
+    }
+    
+    /**
+     * Show debug log dialog with copy functionality
+     */
+    private fun showDebugLogDialog() {
+        val debugLog = getDebugLogFromPrefs()
+        
+        if (debugLog.isEmpty()) {
+            MaterialAlertDialogBuilder(this, R.style.Theme_WireAutoMessenger_Dialog)
+                .setTitle("📋 Debug Log")
+                .setMessage("No debug log available yet. Debug logs are generated when you send messages.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        
+        val scrollView = android.widget.ScrollView(this).apply {
+            layoutParams = android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            setPadding(16, 16, 16, 16)
+        }
+        
+        val textView = TextView(this).apply {
+            text = debugLog
+            textSize = 11f
+            setTextColor(getColor(R.color.on_surface))
+            setPadding(16, 16, 16, 16)
+            setBackgroundColor(getColor(R.color.surface))
+            typeface = android.graphics.Typeface.MONOSPACE
+            isVerticalScrollBarEnabled = true
+            isScrollbarFadingEnabled = false
+        }
+        
+        scrollView.addView(textView)
+        
+        // Set max height to prevent dialog from being too large
+        val maxHeight = (resources.displayMetrics.heightPixels * 0.7).toInt()
+        scrollView.layoutParams.height = maxHeight
+        
+        MaterialAlertDialogBuilder(this, R.style.Theme_WireAutoMessenger_Dialog)
+            .setTitle("📋 Debug Log")
+            .setView(scrollView)
+            .setPositiveButton("OK", null)
+            .setNegativeButton("Copy All") { _, _ ->
+                val clipboard = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                val clip = android.content.ClipData.newPlainText("Debug Log", debugLog)
+                clipboard.setPrimaryClip(clip)
+                Toast.makeText(this, "Debug log copied to clipboard", Toast.LENGTH_SHORT).show()
+            }
+            .setNeutralButton("Clear Log") { _, _ ->
+                MaterialAlertDialogBuilder(this, R.style.Theme_WireAutoMessenger_Dialog)
+                    .setTitle("Clear Debug Log?")
+                    .setMessage("Are you sure you want to clear the debug log? This action cannot be undone.")
+                    .setPositiveButton("Clear") { _, _ ->
+                        prefs.edit().putString("debug_log_full", "").putString("debug_log_last", "").apply()
+                        Toast.makeText(this, "Debug log cleared", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
             }
             .show()
     }

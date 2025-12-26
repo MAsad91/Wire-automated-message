@@ -490,24 +490,47 @@ class WireAutomationService : AccessibilityService() {
      */
     private suspend fun ensureWireInForeground(): Boolean {
         android.util.Log.d("WireAuto", "Checking if Wire is in foreground...")
+        debugLog("NAVIGATION", "Checking if Wire is in foreground...")
+        
+        // First, check if Wire is already in foreground
         val rootNode = rootInActiveWindow
         
         if (rootNode != null && rootNode.packageName == WIRE_PACKAGE) {
             android.util.Log.d("WireAuto", "Wire is already in foreground")
+            debugLog("NAVIGATION", "Wire is already in foreground - package: ${rootNode.packageName}")
             return true
         }
         
         android.util.Log.w("WireAuto", "Wire is not in foreground (current: ${rootNode?.packageName ?: "null"}), attempting to bring it back...")
+        debugLog("NAVIGATION", "Wire is not in foreground (current: ${rootNode?.packageName ?: "null"}), attempting to bring it back...")
         
-        // Try to re-launch Wire app
-        val launchResult = launchWireAppOnce()
-        if (!launchResult) {
-            android.util.Log.e("WireAuto", "Failed to re-launch Wire app")
-            return false
+        // Try to bring Wire to foreground using Intent
+        try {
+            val wireIntent = packageManager.getLaunchIntentForPackage(WIRE_PACKAGE)
+            if (wireIntent != null) {
+                wireIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                wireIntent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                startActivity(wireIntent)
+                android.util.Log.d("WireAuto", "Sent intent to bring Wire to foreground")
+                debugLog("NAVIGATION", "Sent intent to bring Wire to foreground")
+                delay(1000) // Wait a moment for the intent to process
+            } else {
+                android.util.Log.w("WireAuto", "Could not get launch intent for Wire")
+                debugLog("WARN", "Could not get launch intent for Wire")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("WireAuto", "Error bringing Wire to foreground: ${e.message}", e)
+            debugLog("ERROR", "Error bringing Wire to foreground: ${e.message}", e)
         }
         
-        // Wait for Wire to come to foreground
-        return waitForWireInForeground(maxWaitSeconds = 10)
+        // Wait for Wire to come to foreground (shorter timeout to avoid long waits)
+        val result = waitForWireInForeground(maxWaitSeconds = 5)
+        if (result) {
+            debugLog("NAVIGATION", "Successfully brought Wire to foreground")
+        } else {
+            debugLog("ERROR", "Failed to bring Wire to foreground after 5 seconds")
+        }
+        return result
     }
 
     /**
@@ -560,22 +583,36 @@ class WireAutomationService : AccessibilityService() {
         updateNotification("Waiting for Wire app to load...")
         sendProgressBroadcast("Waiting for Wire app to load...")
         android.util.Log.i("WireAuto", "Waiting for Wire app UI to stabilize...")
+        debugLog("NAVIGATION", "Waiting for Wire app UI to stabilize (3 seconds)...")
         delay(3000) // Increased to 3 seconds to allow slow UI rendering to finish
 
         // CRITICAL: Ensure Wire is still in foreground after delay
         // The system might have switched back to Wire Auto Messenger
+        updateNotification("Verifying Wire app is accessible...")
+        sendProgressBroadcast("Verifying Wire app is accessible...")
+        debugLog("NAVIGATION", "Verifying Wire app is still in foreground after delay...")
         if (!ensureWireInForeground()) {
             android.util.Log.e("WireAuto", "Wire app is not in foreground after delay")
+            debugLog("ERROR", "Wire app is not in foreground after delay - aborting")
+            saveDebugLogToPrefs()
             sendErrorBroadcast("Wire app lost focus. Please ensure Wire stays open and try again.")
             resetState()
             return
         }
+        debugLog("NAVIGATION", "Wire app confirmed in foreground")
 
         // PERSISTENT ROOT NODE: Use retry helper to get root node
+        updateNotification("Accessing Wire app...")
+        sendProgressBroadcast("Accessing Wire app...")
+        debugLog("NAVIGATION", "Attempting to get root node from Wire app...")
         var rootNode = getRootWithRetry(maxRetries = 5, delayMs = 500)
         if (rootNode == null) {
             android.util.Log.e("WireAuto", "Could not access Wire app after retries")
+            debugLog("ERROR", "Could not access Wire app after retries - saving debug log")
+            saveDebugLogToPrefs()
             // Try one more time to ensure Wire is in foreground
+            updateNotification("Retrying to access Wire app...")
+            sendProgressBroadcast("Retrying to access Wire app...")
             if (!ensureWireInForeground()) {
                 sendErrorBroadcast("Could not access Wire app. Please ensure Wire is open and try again.")
                 resetState()
@@ -584,11 +621,14 @@ class WireAutomationService : AccessibilityService() {
             rootNode = getRootWithRetry(maxRetries = 5, delayMs = 500)
             if (rootNode == null) {
                 android.util.Log.e("WireAuto", "Could not access Wire app after second attempt")
+                debugLog("ERROR", "Could not access Wire app after second attempt - saving debug log")
+                saveDebugLogToPrefs()
                 sendErrorBroadcast("Could not access Wire app. Please ensure Wire is open and try again.")
                 resetState()
                 return
             }
         }
+        debugLog("NAVIGATION", "Successfully got root node - package: ${rootNode.packageName}")
         
         android.util.Log.i("WireAuto", "Wire app is accessible - package: ${rootNode.packageName}")
 
@@ -615,30 +655,36 @@ class WireAutomationService : AccessibilityService() {
             android.util.Log.w("WireAuto", "Could not refresh accessibility tree: ${e.message}")
         }
         
-        if (rootNode == null) {
-            // Try to ensure Wire is in foreground before retrying
-            if (!ensureWireInForeground()) {
-                android.util.Log.e("WireAuto", "Wire app lost focus during refresh")
-                sendErrorBroadcast("Wire app lost focus. Please ensure Wire stays open and try again.")
-                resetState()
-                return
-            }
-            rootNode = getRootWithRetry(maxRetries = 5, delayMs = 500)
             if (rootNode == null) {
-                android.util.Log.e("WireAuto", "Could not get root node after refresh")
-                sendErrorBroadcast("Could not access Wire app. Please ensure Wire is open and try again.")
-                resetState()
-                return
+                // Try to ensure Wire is in foreground before retrying
+                if (!ensureWireInForeground()) {
+                    android.util.Log.e("WireAuto", "Wire app lost focus during refresh")
+                    debugLog("ERROR", "Wire app lost focus during refresh - saving debug log")
+                    saveDebugLogToPrefs()
+                    sendErrorBroadcast("Wire app lost focus. Please ensure Wire stays open and try again.")
+                    resetState()
+                    return
+                }
+                rootNode = getRootWithRetry(maxRetries = 5, delayMs = 500)
+                if (rootNode == null) {
+                    android.util.Log.e("WireAuto", "Could not get root node after refresh")
+                    debugLog("ERROR", "Could not get root node after refresh - saving debug log")
+                    saveDebugLogToPrefs()
+                    sendErrorBroadcast("Could not access Wire app. Please ensure Wire is open and try again.")
+                    resetState()
+                    return
+                }
             }
-        }
 
         updateNotification("Navigating to conversations...")
         sendProgressBroadcast("Navigating to conversations...")
+        debugLog("NAVIGATION", "Starting navigation to conversations list...")
         
         // UI INTERACTION FIX: Search for "Search conversations" bar as starting point if main list fails
         val searchBar = findSearchConversationsBar(rootNode)
         if (searchBar != null) {
             android.util.Log.d("WireAuto", "Found 'Search conversations' bar - using as reference point")
+            debugLog("NAVIGATION", "Found 'Search conversations' bar - using as reference point")
             // Click on search bar to ensure we're on the right screen - use gesture dispatch
             try {
                 if (clickNodeWithGesture(searchBar)) {
@@ -649,6 +695,7 @@ class WireAutomationService : AccessibilityService() {
                 }
             } catch (e: Exception) {
                 android.util.Log.d("WireAuto", "Could not interact with search bar: ${e.message}")
+                debugLog("WARN", "Could not interact with search bar: ${e.message}")
             }
             rootNode = getRootWithRetry(maxRetries = 3, delayMs = 500)
         }
@@ -656,17 +703,32 @@ class WireAutomationService : AccessibilityService() {
         // Try to navigate to conversations/contacts list
         // Wire typically shows conversations by default, but we need to ensure we're on the right screen
         if (rootNode != null) {
+            debugLog("NAVIGATION", "Calling navigateToConversationsList...")
             navigateToConversationsList(rootNode)
+            debugLog("NAVIGATION", "navigateToConversationsList completed")
+        } else {
+            debugLog("WARN", "Root node is null before navigation")
         }
+        
+        updateNotification("Waiting for navigation to complete...")
+        sendProgressBroadcast("Waiting for navigation to complete...")
+        debugLog("NAVIGATION", "Waiting 4 seconds for navigation to complete...")
         delay(4000) // Wait longer for navigation to complete
 
         // Refresh root after navigation using retry helper
+        updateNotification("Verifying navigation...")
+        sendProgressBroadcast("Verifying navigation...")
+        debugLog("NAVIGATION", "Refreshing root node after navigation...")
         rootNode = getRootWithRetry(maxRetries = 3, delayMs = 500)
         if (rootNode == null) {
             android.util.Log.e("WireAuto", "Could not get root node after navigation")
+            debugLog("ERROR", "Could not get root node after navigation - saving debug log")
+            saveDebugLogToPrefs()
             sendErrorBroadcast("Lost access to Wire app. Please try again.")
+            resetState()
             return
         }
+        debugLog("NAVIGATION", "Successfully got root node after navigation")
         
         // Log UI structure for debugging
         android.util.Log.d("WireAuto", "Wire app UI structure:")
@@ -675,15 +737,23 @@ class WireAutomationService : AccessibilityService() {
         logUIStructure(rootNode, 0, 3) // Log first 3 levels
         
         // Get all contact/conversation items
+        updateNotification("Finding contacts...")
+        sendProgressBroadcast("Finding contacts...")
+        debugLog("SEARCH", "Starting to find contact/conversation items...")
         var contactItems = getAllContactItems(rootNode)
+        debugLog("SEARCH", "Found ${contactItems.size} contact items on first attempt")
         
         if (contactItems.isEmpty()) {
             // Try scrolling to load more contacts
             android.util.Log.d("WireAuto", "No contacts found, trying to scroll...")
+            debugLog("SEARCH", "No contacts found, trying to scroll to load more...")
+            updateNotification("Scrolling to find contacts...")
+            sendProgressBroadcast("Scrolling to find contacts...")
             try {
                 // Find scrollable view and scroll down
                 val scrollableView = findScrollableView(rootNode)
                 if (scrollableView != null) {
+                    debugLog("SEARCH", "Found scrollable view, scrolling down...")
                     // Use ACTION_SCROLL_FORWARD to scroll down in vertical lists
                     val scrolled = scrollableView.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
                     if (scrolled) {
@@ -833,12 +903,23 @@ class WireAutomationService : AccessibilityService() {
         
         val totalContacts = rowItems.size
         android.util.Log.i("WireAuto", "=== STEP 4: Found $totalContacts contacts ===")
+        debugLog("STATS", "Found $totalContacts contacts to process")
         android.util.Log.i("WireAuto", "Starting to send messages to $totalContacts contacts")
         android.util.Log.i("WireAuto", "State check: isWireOpened=${isWireOpened.get()}, isSendingInProgress=${isSendingInProgress.get()}")
+        
+        if (totalContacts == 0) {
+            android.util.Log.e("WireAuto", "No contacts found to send messages to")
+            debugLog("ERROR", "No contacts found to send messages to - saving debug log")
+            saveDebugLogToPrefs()
+            sendErrorBroadcast("No contacts found in Wire app. Please ensure you have conversations in Wire and try again.")
+            resetState()
+            return
+        }
         
         updateNotification("Found $totalContacts contacts. Sending messages...")
         sendProgressBroadcast("Found $totalContacts contacts. Sending messages...", 0)
         android.util.Log.i("WireAuto", "=== Starting to process $totalContacts contacts from top to bottom ===")
+        debugLog("EVENT", "=== Starting to process $totalContacts contacts from top to bottom ===")
         
         val processedContactIndices = mutableSetOf<Int>() // Track processed contacts by index to avoid duplicates
         val sentContactNames = mutableSetOf<String>() // Track sent contacts by name to avoid duplicates
@@ -1314,19 +1395,57 @@ class WireAutomationService : AccessibilityService() {
                 }
 
                 // Type message - use ACTION_SET_TEXT to set the entire message at once
+                updateNotification("Typing message to $contactName...")
+                sendProgressBroadcast("Typing message to $contactName...", contactsSent)
                 debugLog("TEXT", "STEP 4.${contactsProcessed}.4: Setting message text in input field")
                 debugLog("TEXT", "Message content: $message")
                 android.util.Log.d("WireAuto", "Text Entered: $message")
                 android.util.Log.i("WireAuto", "STEP 4.${contactsProcessed}.4: Setting message text: $message")
-                val bundle = android.os.Bundle()
-                bundle.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, message)
-                val textSet = messageInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
-                debugLog("TEXT", "ACTION_SET_TEXT result: $textSet")
-                android.util.Log.i("WireAuto", "Message text set: $textSet")
+                
+                // Try to set text multiple times to ensure it's set correctly
+                var textSet = false
+                var textVerified = false
+                for (textAttempt in 1..3) {
+                    val bundle = android.os.Bundle()
+                    bundle.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, message)
+                    textSet = messageInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
+                    debugLog("TEXT", "ACTION_SET_TEXT attempt $textAttempt result: $textSet")
+                    android.util.Log.i("WireAuto", "Message text set attempt $textAttempt: $textSet")
+                    
+                    if (textSet) {
+                        // Wait a moment and verify text was actually set
+                        delay(500)
+                        val currentText = messageInput.text?.toString()?.trim() ?: ""
+                        if (currentText == message || currentText.contains(message.take(10))) {
+                            textVerified = true
+                            debugLog("TEXT", "Text verified in input field: ${currentText.take(50)}...")
+                            android.util.Log.i("WireAuto", "Text verified in input field: ${currentText.take(50)}...")
+                            break
+                        } else {
+                            android.util.Log.w("WireAuto", "Text not verified (attempt $textAttempt): expected '$message', got '$currentText'")
+                            debugLog("WARN", "Text not verified (attempt $textAttempt): expected '${message.take(50)}...', got '${currentText.take(50)}...'")
+                            // Refresh message input and try again
+                            currentRoot = getRootWithRetry(maxRetries = 2, delayMs = 300)
+                            if (currentRoot != null) {
+                                messageInput = findMessageInput(currentRoot) ?: messageInput
+                            }
+                        }
+                    } else {
+                        android.util.Log.w("WireAuto", "ACTION_SET_TEXT returned false (attempt $textAttempt)")
+                        delay(500)
+                    }
+                }
+                
+                if (!textSet || !textVerified) {
+                    android.util.Log.e("WireAuto", "Failed to set message text after 3 attempts")
+                    debugLog("ERROR", "Failed to set message text after 3 attempts - message may not send correctly")
+                    // Continue anyway - sometimes the text is set even if verification fails
+                }
                 
                 // Wait for text to be set and send button to be enabled (random delay 1-3 sec)
-                val typingDelay = (1000..3000).random()
+                val typingDelay = (1500..3000).random()
                 android.util.Log.d("WireAuto", "Waiting ${typingDelay}ms for send button to be enabled...")
+                debugLog("TEXT", "Waiting ${typingDelay}ms for send button to be enabled...")
                 delay(typingDelay.toLong())
 
                 // Refresh root after typing using retry helper
@@ -1346,6 +1465,8 @@ class WireAutomationService : AccessibilityService() {
                 }
 
                 // Find and click send button - enhanced detection and verification
+                updateNotification("Sending message to $contactName...")
+                sendProgressBroadcast("Sending message to $contactName...", contactsSent)
                 var messageSent = false
                 debugLog("CLICK", "STEP 4.${contactsProcessed}.5: Looking for send button")
                 android.util.Log.i("WireAuto", "STEP 4.${contactsProcessed}.5: Looking for send button...")
@@ -1452,26 +1573,44 @@ class WireAutomationService : AccessibilityService() {
                             android.util.Log.d("WireAuto", "Focus action not supported: ${e.message}")
                         }
                         
-                        // Step 2: Click send button - try multiple methods
+                        // Step 2: Click send button - try multiple methods with retries
                         var clicked = false
                         
                         android.util.Log.d("WireAuto", "Send Clicked: Attempting to click send button")
+                        debugLog("CLICK", "Attempting to click send button for contact: $contactName")
                         
                         // Method 1: Use gesture dispatch instead of ACTION_CLICK (harder for Wire to block)
                         clicked = clickNodeWithGesture(sendButton)
+                        debugLog("CLICK", "Method 1 - Gesture dispatch on send button: $clicked")
                         android.util.Log.d("WireAuto", "Send Clicked: Method 1 - Gesture dispatch on send button: $clicked")
                         android.util.Log.i("WireAuto", "Method 1 - Gesture dispatch on send button: $clicked")
                         if (clicked) {
-                            val clickDelay = (1000..3000).random()
+                            val clickDelay = (1500..3000).random()
+                            debugLog("CLICK", "Gesture dispatch succeeded, waiting ${clickDelay}ms...")
                             delay(clickDelay.toLong())
                         }
                         
                         // Fallback: Try ACTION_CLICK if gesture failed
                         if (!clicked && sendButton.isClickable) {
                             clicked = sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                            debugLog("CLICK", "Method 1.5 - Fallback ACTION_CLICK: $clicked")
                             android.util.Log.d("WireAuto", "Send Clicked: Method 1.5 - Fallback ACTION_CLICK: $clicked")
                             if (clicked) {
-                                val clickDelay = (1000..3000).random()
+                                val clickDelay = (1500..3000).random()
+                                debugLog("CLICK", "ACTION_CLICK succeeded, waiting ${clickDelay}ms...")
+                                delay(clickDelay.toLong())
+                            }
+                        }
+                        
+                        // Retry Method 1 if still not clicked
+                        if (!clicked) {
+                            android.util.Log.d("WireAuto", "Retrying gesture dispatch...")
+                            debugLog("CLICK", "Retrying gesture dispatch...")
+                            delay(500)
+                            clicked = clickNodeWithGesture(sendButton)
+                            if (clicked) {
+                                debugLog("CLICK", "Retry gesture dispatch succeeded")
+                                val clickDelay = (1500..3000).random()
                                 delay(clickDelay.toLong())
                             }
                         }
@@ -1534,18 +1673,23 @@ class WireAutomationService : AccessibilityService() {
                         // Step 3: Verify click success - STRICT VERIFICATION
                         if (clicked) {
                             android.util.Log.i("WireAuto", "Send button clicked - verifying message was sent (strict check)...")
+                            debugLog("VERIFY", "Send button clicked - verifying message was sent for contact: $contactName")
                             
                             // Wait longer for UI to update and message to actually send
-                            val verificationDelay = (2000..3500).random()
+                            val verificationDelay = (2500..4000).random()
+                            debugLog("VERIFY", "Waiting ${verificationDelay}ms for message to send...")
                             delay(verificationDelay.toLong())
                             
                             // Refresh root to check verification - try multiple times
                             var verificationPassed = false
-                            for (verifyAttempt in 1..3) {
+                            for (verifyAttempt in 1..5) { // Increased to 5 attempts
+                                debugLog("VERIFY", "Verification attempt $verifyAttempt/5")
                                 currentRoot = getRootWithRetry(maxRetries = 3, delayMs = 500)
                                 if (currentRoot != null) {
                                     val refreshedInput = findMessageInput(currentRoot)
                                     val inputText = refreshedInput?.text?.toString()?.trim() ?: ""
+                                    
+                                    debugLog("VERIFY", "Input text on attempt $verifyAttempt: '${inputText.take(50)}...'")
                                     
                                     // STRICT: Input must be cleared (empty) for message to be considered sent
                                     if (inputText.isEmpty()) {
@@ -1553,28 +1697,58 @@ class WireAutomationService : AccessibilityService() {
                                         messageSent = true
                                         verificationPassed = true
                                         android.util.Log.i("WireAuto", "Send confirmed (attempt $verifyAttempt): Input box is empty - message sent successfully!")
+                                        debugLog("SUCCESS", "Message send verified - input box is empty")
                                         break
+                                    } else if (inputText != message && inputText.length < message.length) {
+                                        // Input changed and is shorter - likely sent, wait a bit more to confirm
+                                        android.util.Log.d("WireAuto", "Input text changed (attempt $verifyAttempt): '$inputText' - message likely sent, waiting more...")
+                                        debugLog("VERIFY", "Input text changed - message likely sent, waiting more...")
+                                        delay(1500)
+                                        continue
                                     } else if (inputText != message) {
                                         // Input changed but not empty - might have sent, wait a bit more
-                                        android.util.Log.d("WireAuto", "Input text changed but not empty: '$inputText', waiting more...")
-                                        delay(1000)
+                                        android.util.Log.d("WireAuto", "Input text changed but not empty (attempt $verifyAttempt): '$inputText', waiting more...")
+                                        debugLog("VERIFY", "Input text changed but not empty, waiting more...")
+                                        delay(1500)
                                         continue
                                     } else {
                                         // Input still has the same message - message NOT sent
                                         android.util.Log.w("WireAuto", "Input still contains message (attempt $verifyAttempt): '$inputText' - message may not have been sent")
-                                        if (verifyAttempt < 3) {
-                                            delay(1500)
+                                        debugLog("WARN", "Input still contains message on attempt $verifyAttempt")
+                                        if (verifyAttempt < 5) {
+                                            delay(2000) // Longer delay between attempts
                                             continue
                                         } else {
-                                            // After 3 attempts, if input still has message, consider it failed
-                                            messageSent = false
-                                            android.util.Log.e("WireAuto", "Send verification FAILED: Input still contains message after multiple checks")
+                                            // After 5 attempts, if input still has message, try clicking send button again
+                                            android.util.Log.w("WireAuto", "Input still has message after 5 attempts - trying to click send button again...")
+                                            debugLog("WARN", "Input still has message after 5 attempts - retrying send button click")
+                                            // Try clicking send button one more time
+                                            if (sendButton.isClickable) {
+                                                sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                                delay(2000)
+                                                // Check one more time
+                                                currentRoot = getRootWithRetry(maxRetries = 2, delayMs = 500)
+                                                val finalInput = currentRoot?.let { findMessageInput(it) }
+                                                val finalText = finalInput?.text?.toString()?.trim() ?: ""
+                                                if (finalText.isEmpty()) {
+                                                    messageSent = true
+                                                    verificationPassed = true
+                                                    debugLog("SUCCESS", "Message sent after retry click")
+                                                } else {
+                                                    messageSent = false
+                                                    android.util.Log.e("WireAuto", "Send verification FAILED: Input still contains message after retry")
+                                                }
+                                            } else {
+                                                messageSent = false
+                                                android.util.Log.e("WireAuto", "Send verification FAILED: Input still contains message after multiple checks")
+                                            }
                                         }
                                     }
                                 } else {
                                     android.util.Log.w("WireAuto", "Lost access during verification (attempt $verifyAttempt)")
-                                    if (verifyAttempt < 3) {
-                                        delay(1000)
+                                    debugLog("WARN", "Lost access during verification attempt $verifyAttempt")
+                                    if (verifyAttempt < 5) {
+                                        delay(1500)
                                         continue
                                     }
                                 }
@@ -1582,9 +1756,13 @@ class WireAutomationService : AccessibilityService() {
                             
                             if (!verificationPassed && !messageSent) {
                                 android.util.Log.e("WireAuto", "Send verification failed - message was NOT sent for contact: $contactName")
+                                debugLog("ERROR", "Send verification failed - message was NOT sent for contact: $contactName")
+                            } else if (messageSent) {
+                                debugLog("SUCCESS", "Message send verification PASSED for contact: $contactName")
                             }
                         } else {
                             android.util.Log.w("WireAuto", "Could not click send button for contact: $contactName")
+                            debugLog("ERROR", "Could not click send button for contact: $contactName")
                         }
                     }
                 } else {
