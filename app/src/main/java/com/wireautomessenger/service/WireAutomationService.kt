@@ -295,19 +295,14 @@ class WireAutomationService : AccessibilityService() {
         android.util.Log.i("WireAuto", "Waiting for Wire app UI to stabilize...")
         delay(3000) // Increased to 3 seconds to allow slow UI rendering to finish
 
-        // Ensure we're in Wire app - check package name (NO relaunch)
-        var rootNode = rootInActiveWindow
-        if (rootNode == null || rootNode.packageName != WIRE_PACKAGE) {
-            android.util.Log.w("WireAuto", "Wire app not in foreground - waiting...")
-            delay(2000)
-            rootNode = rootInActiveWindow
-            if (rootNode == null || rootNode.packageName != WIRE_PACKAGE) {
-                android.util.Log.e("WireAuto", "Could not access Wire app after wait")
+        // PERSISTENT ROOT NODE: Use retry helper to get root node
+        var rootNode = getRootWithRetry(maxRetries = 3, delayMs = 500)
+        if (rootNode == null) {
+            android.util.Log.e("WireAuto", "Could not access Wire app after retries")
                 sendErrorBroadcast("Could not access Wire app. Please ensure Wire is open and try again.")
                 return
-            }
         }
-
+        
         android.util.Log.i("WireAuto", "Wire app is accessible - package: ${rootNode.packageName}")
 
         // EXPLICIT FOCUS: Perform a small scroll or global action to refresh accessibility node tree
@@ -327,10 +322,19 @@ class WireAutomationService : AccessibilityService() {
                 delay(300)
                 android.util.Log.d("WireAuto", "Performed global action to refresh accessibility tree")
             }
-            // Refresh root after action
-            rootNode = rootInActiveWindow
+            // Refresh root after action using retry helper
+            rootNode = getRootWithRetry(maxRetries = 3, delayMs = 500)
         } catch (e: Exception) {
             android.util.Log.w("WireAuto", "Could not refresh accessibility tree: ${e.message}")
+        }
+        
+        if (rootNode == null) {
+            rootNode = getRootWithRetry(maxRetries = 3, delayMs = 500)
+            if (rootNode == null) {
+                android.util.Log.e("WireAuto", "Could not get root node after refresh")
+                sendErrorBroadcast("Could not access Wire app. Please ensure Wire is open and try again.")
+                return
+            }
         }
 
         updateNotification("Navigating to conversations...")
@@ -340,10 +344,9 @@ class WireAutomationService : AccessibilityService() {
         val searchBar = findSearchConversationsBar(rootNode)
         if (searchBar != null) {
             android.util.Log.d("WireAuto", "Found 'Search conversations' bar - using as reference point")
-            // Click on search bar to ensure we're on the right screen
+            // Click on search bar to ensure we're on the right screen - use gesture dispatch
             try {
-                if (searchBar.isClickable) {
-                    searchBar.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                if (clickNodeWithGesture(searchBar)) {
                     delay(500)
                     // Dismiss search if it opened
                     performGlobalAction(GLOBAL_ACTION_BACK)
@@ -352,7 +355,7 @@ class WireAutomationService : AccessibilityService() {
             } catch (e: Exception) {
                 android.util.Log.d("WireAuto", "Could not interact with search bar: ${e.message}")
             }
-            rootNode = rootInActiveWindow
+            rootNode = getRootWithRetry(maxRetries = 3, delayMs = 500)
         }
         
         // Try to navigate to conversations/contacts list
@@ -360,9 +363,10 @@ class WireAutomationService : AccessibilityService() {
         navigateToConversationsList(rootNode)
         delay(4000) // Wait longer for navigation to complete
 
-        // Refresh root after navigation
-        rootNode = rootInActiveWindow
-        if (rootNode == null || rootNode.packageName != WIRE_PACKAGE) {
+        // Refresh root after navigation using retry helper
+        rootNode = getRootWithRetry(maxRetries = 3, delayMs = 500)
+        if (rootNode == null) {
+            android.util.Log.e("WireAuto", "Could not get root node after navigation")
             sendErrorBroadcast("Lost access to Wire app. Please try again.")
             return
         }
@@ -394,8 +398,8 @@ class WireAutomationService : AccessibilityService() {
                     android.util.Log.w("WireAuto", "No scrollable view found for scrolling")
                 }
                 delay(2000)
-                rootNode = rootInActiveWindow
-                if (rootNode != null && rootNode.packageName == WIRE_PACKAGE) {
+                rootNode = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                if (rootNode != null) {
                     contactItems = getAllContactItems(rootNode)
                     if (contactItems.isNotEmpty()) {
                         android.util.Log.d("WireAuto", "Found ${contactItems.size} contacts after scrolling")
@@ -409,10 +413,26 @@ class WireAutomationService : AccessibilityService() {
             if (contactItems.isEmpty()) {
                 android.util.Log.w("WireAuto", "No contacts found, waiting longer and trying again...")
                 delay(3000)
-                rootNode = rootInActiveWindow
-                if (rootNode != null && rootNode.packageName == WIRE_PACKAGE) {
+                rootNode = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                if (rootNode != null) {
                     contactItems = getAllContactItems(rootNode)
                     android.util.Log.d("WireAuto", "After longer wait: ${contactItems.size} contacts found")
+                }
+            }
+            
+            // GENERIC LIST INTERACTION: If still empty, try clicking first 3 children of scrollable view
+            if (contactItems.isEmpty()) {
+                android.util.Log.w("WireAuto", "No contacts found via standard methods, trying generic list interaction...")
+                rootNode = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                if (rootNode != null) {
+                    if (clickFirstScrollableChildren(rootNode, maxChildren = 3)) {
+                        delay(2000) // Wait for UI to update
+                        rootNode = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                        if (rootNode != null) {
+                            contactItems = getAllContactItems(rootNode)
+                            android.util.Log.d("WireAuto", "After generic interaction: ${contactItems.size} contacts found")
+                        }
+                    }
                 }
             }
             
@@ -555,18 +575,18 @@ class WireAutomationService : AccessibilityService() {
                 updateNotification("Sending to contact $contactsProcessed/$totalContacts: $contactName...")
                 sendProgressBroadcast("Sending to contact $contactsProcessed/$totalContacts: $contactName...", contactsSent)
                 
-                // Check if we're still in Wire app (NO relaunch - state machine prevents this)
-                var currentRoot = rootInActiveWindow
-                if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
+                // Check if we're still in Wire app (NO relaunch - state machine prevents this) - use retry helper
+                var currentRoot = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                if (currentRoot == null) {
                     android.util.Log.w("WireAuto", "Not in Wire app - checking state machine")
                     
                     // State machine check: If Wire was opened but we lost access, wait and retry
                     if (isWireOpened.get() && isSendingInProgress.get()) {
                         android.util.Log.w("WireAuto", "Wire was opened but lost access - waiting for recovery...")
                         delay(2000)
-                            currentRoot = rootInActiveWindow
+                        currentRoot = getRootWithRetry(maxRetries = 3, delayMs = 500)
                     
-                    if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
+                        if (currentRoot == null) {
                             android.util.Log.w("WireAuto", "Still not in Wire app after wait - marking contact as failed")
                         contactResults.add(com.wireautomessenger.model.ContactResult(
                             name = contactName,
@@ -598,16 +618,16 @@ class WireAutomationService : AccessibilityService() {
                     android.util.Log.d("WireAuto", "Currently in a conversation, going back to contacts list...")
                     performGlobalAction(GLOBAL_ACTION_BACK)
                     delay(3000) // Wait longer for navigation
-                    currentRoot = rootInActiveWindow
+                    currentRoot = getRootWithRetry(maxRetries = 3, delayMs = 500)
                     
                     // Verify we're still in Wire app and on the list (NO relaunch - state machine)
-                    if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
+                    if (currentRoot == null) {
                         android.util.Log.w("WireAuto", "Lost access to Wire after going back - waiting for recovery...")
                         // Wait and retry (NO relaunch - state machine prevents infinite loops)
                         delay(2000)
-                                currentRoot = rootInActiveWindow
+                        currentRoot = getRootWithRetry(maxRetries = 3, delayMs = 500)
                         
-                        if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
+                        if (currentRoot == null) {
                             android.util.Log.w("WireAuto", "Still not in Wire app after wait - marking contact as failed")
                             contactResults.add(com.wireautomessenger.model.ContactResult(
                                 name = contactName,
@@ -626,7 +646,7 @@ class WireAutomationService : AccessibilityService() {
                         android.util.Log.w("WireAuto", "Still in conversation after going back, trying once more...")
                         performGlobalAction(GLOBAL_ACTION_BACK)
                         delay(2000)
-                        currentRoot = rootInActiveWindow
+                        currentRoot = getRootWithRetry(maxRetries = 3, delayMs = 500)
                     }
                 }
                 
@@ -718,46 +738,27 @@ class WireAutomationService : AccessibilityService() {
                     android.util.Log.e("WireAuto", "Gesture dispatch failed: ${e.message}")
                 }
                 
-                // Method 2: Direct click on row item
-                if (!clicked && refreshedRowItem.isClickable) {
-                    clicked = refreshedRowItem.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    android.util.Log.d("WireAuto", "Method 2 - Direct click on row: $clicked")
+                // Method 2: USE GESTURE DISPATCH FOR EVERYTHING - Use gesture dispatch instead of ACTION_CLICK
+                if (!clicked) {
+                    clicked = clickNodeWithGesture(refreshedRowItem)
+                    android.util.Log.d("WireAuto", "Method 2 - Gesture dispatch on row: $clicked")
                     if (clicked) delay(500)
                 }
                 
-                // Method 2.5: FORCE CLICK - If ACTION_CLICK fails, try clicking center coordinates
-                if (!clicked) {
-                    try {
-                        val forceClickPath = android.graphics.Path()
-                        forceClickPath.moveTo(centerX, centerY)
-                        val forceClickStroke = android.accessibilityservice.GestureDescription.StrokeDescription(
-                            forceClickPath, 0, 200 // 200ms tap
-                        )
-                        val forceClickGesture = android.accessibilityservice.GestureDescription.Builder()
-                            .addStroke(forceClickStroke)
-                            .build()
-                        clicked = dispatchGesture(forceClickGesture, object : android.accessibilityservice.AccessibilityService.GestureResultCallback() {
-                            override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) {
-                                android.util.Log.d("WireAuto", "Force click gesture completed")
-                            }
-                            override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) {
-                                android.util.Log.w("WireAuto", "Force click gesture cancelled")
-                            }
-                        }, null)
-                        android.util.Log.d("WireAuto", "Method 2.5 - Force click at center coordinates: $clicked")
-                        if (clicked) delay(500)
-                    } catch (e: Exception) {
-                        android.util.Log.e("WireAuto", "Force click failed: ${e.message}")
-                    }
+                // Method 2.5: Fallback to ACTION_CLICK if gesture failed
+                if (!clicked && refreshedRowItem.isClickable) {
+                    clicked = refreshedRowItem.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    android.util.Log.d("WireAuto", "Method 2.5 - Fallback ACTION_CLICK on row: $clicked")
+                    if (clicked) delay(500)
                 }
                 
-                // Method 3: Find and click any clickable child in the row
+                // Method 3: Find and click any clickable child in the row using gesture dispatch
                 if (!clicked) {
                     for (i in 0 until refreshedRowItem.childCount) {
                         val child = refreshedRowItem.getChild(i)
                         if (child != null && child.isClickable) {
-                            clicked = child.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            android.util.Log.d("WireAuto", "Method 3 - Clicked clickable child $i in row: $clicked")
+                            clicked = clickNodeWithGesture(child)
+                            android.util.Log.d("WireAuto", "Method 3 - Gesture dispatch on clickable child $i: $clicked")
                             if (clicked) {
                                 delay(500)
                                 break
@@ -766,14 +767,14 @@ class WireAutomationService : AccessibilityService() {
                     }
                 }
                 
-                // Method 4: Find clickable parent (the row container itself)
+                // Method 4: Find clickable parent and use gesture dispatch
                 if (!clicked) {
                     var parent = refreshedRowItem.parent
                     var depth = 0
                     while (parent != null && depth < 5 && !clicked) {
                         if (parent.isClickable) {
-                            clicked = parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            android.util.Log.d("WireAuto", "Method 4 - Clicked parent at depth $depth: $clicked")
+                            clicked = clickNodeWithGesture(parent)
+                            android.util.Log.d("WireAuto", "Method 4 - Gesture dispatch on parent at depth $depth: $clicked")
                             if (clicked) delay(500)
                             break
                         }
@@ -782,19 +783,19 @@ class WireAutomationService : AccessibilityService() {
                     }
                 }
                 
-                // Method 5: Try clicking the row item even if not explicitly clickable
+                // Method 5: Try gesture dispatch on row item even if not explicitly clickable
                 if (!clicked) {
-                    clicked = refreshedRowItem.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    android.util.Log.d("WireAuto", "Method 5 - Force click on row item: $clicked")
+                    clicked = clickNodeWithGesture(refreshedRowItem)
+                    android.util.Log.d("WireAuto", "Method 5 - Gesture dispatch on row item: $clicked")
                     if (clicked) delay(500)
                 }
                 
-                // Method 6: Use findClickableNode helper
+                // Method 6: Use findClickableNode helper with gesture dispatch
                 if (!clicked) {
                     val clickableNode = findClickableNode(refreshedRowItem)
                     if (clickableNode != null) {
-                        clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                        android.util.Log.d("WireAuto", "Method 6 - Clicked via findClickableNode: $clicked")
+                        clicked = clickNodeWithGesture(clickableNode)
+                        android.util.Log.d("WireAuto", "Method 6 - Gesture dispatch via findClickableNode: $clicked")
                         if (clicked) delay(500)
                     }
                 }
@@ -815,53 +816,36 @@ class WireAutomationService : AccessibilityService() {
                 android.util.Log.i("WireAuto", "STEP 4.${contactsProcessed}.2: Waiting for conversation to open...")
                 
                 // Add 2-second delay after opening contact's chat to allow UI to load
-                delay(2000)
-                
-                // Verify we're in conversation view - try multiple times (NO relaunch)
-                currentRoot = rootInActiveWindow
-                var attempts = 0
-                while ((currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) && attempts < 3) {
-                    android.util.Log.d("WireAuto", "Waiting for Wire app access (attempt ${attempts + 1})...")
-                    delay(1000)
-                    currentRoot = rootInActiveWindow
-                    attempts++
-                }
-                
-                if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
-                    android.util.Log.w("WireAuto", "Not in Wire app after clicking contact: $contactName - waiting...")
-                    // Wait and retry (NO relaunch - state machine prevents infinite loops)
                     delay(2000)
-                            currentRoot = rootInActiveWindow
-                    
-                    if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
-                        android.util.Log.w("WireAuto", "Still not in Wire app - trying back button")
-                        performGlobalAction(GLOBAL_ACTION_BACK)
-                        delay(2000)
-                        currentRoot = rootInActiveWindow
-                        
-                        if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
+                
+                // DON'T AUTO-EXIT: Increase timeout to 10 seconds before giving up
+                android.util.Log.d("WireAuto", "Waiting up to 10 seconds for conversation to open...")
+                currentRoot = getRootWithRetry(maxRetries = 10, delayMs = 1000) // 10 seconds total
+                
+                if (currentRoot == null) {
+                    android.util.Log.w("WireAuto", "Not in Wire app after clicking contact: $contactName after 10 seconds")
                         contactResults.add(com.wireautomessenger.model.ContactResult(
                             name = contactName,
                             status = com.wireautomessenger.model.ContactStatus.FAILED,
-                            errorMessage = "Lost access after clicking contact",
+                        errorMessage = "Lost access after clicking contact (10s timeout)",
                             position = index + 1
                         ))
                         sendContactUpdate(contactName, "failed", index + 1, "Lost access after clicking")
                         continue
-                        }
-                    }
                 }
 
-                // Verify we're actually in a conversation (message input should exist)
+                // DON'T AUTO-EXIT: Wait up to 10 seconds for message input to appear
+                android.util.Log.d("WireAuto", "Waiting up to 10 seconds for message input to appear...")
                 var messageInput = findMessageInput(currentRoot)
-                if (messageInput == null) {
-                    // Wait a bit more and try again - conversation might still be loading
-                    android.util.Log.d("WireAuto", "Message input not found immediately, waiting...")
-                    delay(2000)
-                    currentRoot = rootInActiveWindow
-                    if (currentRoot != null && currentRoot.packageName == WIRE_PACKAGE) {
+                var inputAttempts = 0
+                while (messageInput == null && inputAttempts < 10) {
+                    android.util.Log.d("WireAuto", "Message input not found, waiting... (attempt ${inputAttempts + 1}/10)")
+                    delay(1000)
+                    currentRoot = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                    if (currentRoot != null) {
                         messageInput = findMessageInput(currentRoot)
                     }
+                    inputAttempts++
                 }
 
                 if (messageInput == null) {
@@ -918,12 +902,21 @@ class WireAutomationService : AccessibilityService() {
                     android.util.Log.d("WireAuto", "Could not handle keyboard blocking: ${e.message}")
                 }
 
-                // Focus on message input
+                // FORCE FOCUS BEFORE TYPING: Perform ACTION_CLICK and ACTION_FOCUS before ACTION_SET_TEXT
+                android.util.Log.d("WireAuto", "Force focusing message input before typing...")
                 try {
+                    // First, click on the input field using gesture dispatch
+                    if (clickNodeWithGesture(messageInput)) {
+                        android.util.Log.d("WireAuto", "Clicked message input via gesture")
+                        delay(500)
+                    }
+                    
+                    // Then, perform ACTION_FOCUS
                     messageInput.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                    android.util.Log.d("WireAuto", "Focused message input")
                     delay(500)
                 } catch (e: Exception) {
-                    android.util.Log.w("WireAuto", "Could not focus message input: ${e.message}")
+                    android.util.Log.w("WireAuto", "Could not force focus message input: ${e.message}")
                 }
 
                 // Clear any existing text first
@@ -950,28 +943,12 @@ class WireAutomationService : AccessibilityService() {
                 android.util.Log.d("WireAuto", "Waiting ${typingDelay}ms for send button to be enabled...")
                 delay(typingDelay.toLong())
 
-                // Refresh root after typing
-                currentRoot = rootInActiveWindow
-                if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
+                // Refresh root after typing using retry helper
+                currentRoot = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                if (currentRoot == null) {
                     android.util.Log.w("WireAuto", "Lost access to Wire after typing: $contactName")
                     performGlobalAction(GLOBAL_ACTION_BACK)
                     delay(1000)
-                    contactResults.add(com.wireautomessenger.model.ContactResult(
-                        name = contactName,
-                        status = com.wireautomessenger.model.ContactStatus.FAILED,
-                        errorMessage = "Lost access after typing",
-                        position = index + 1
-                    ))
-                    sendContactUpdate(contactName, "failed", index + 1, "Lost access after typing")
-                    continue
-                }
-
-                // Refresh root after typing to get updated UI
-                currentRoot = rootInActiveWindow
-                if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
-                    android.util.Log.w("WireAuto", "Lost access to Wire after typing: $contactName")
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                    delay(2000)
                     contactResults.add(com.wireautomessenger.model.ContactResult(
                         name = contactName,
                         status = com.wireautomessenger.model.ContactStatus.FAILED,
@@ -986,12 +963,12 @@ class WireAutomationService : AccessibilityService() {
                 var messageSent = false
                 android.util.Log.i("WireAuto", "STEP 4.${contactsProcessed}.5: Looking for send button...")
                 
-                // Try multiple times to find send button (it might take a moment to appear)
+                // DON'T AUTO-EXIT: Try up to 10 seconds to find send button
                 var sendButton: AccessibilityNodeInfo? = null
-                for (attempt in 1..5) { // Increased attempts to 5
-                    currentRoot = rootInActiveWindow
-                    if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
-                        android.util.Log.w("WireAuto", "Lost access to Wire while finding send button")
+                for (attempt in 1..10) { // 10 attempts = 10 seconds
+                    currentRoot = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                    if (currentRoot == null) {
+                        android.util.Log.w("WireAuto", "Lost access to Wire while finding send button (attempt $attempt)")
                         delay(1000)
                         continue
                     }
@@ -1091,11 +1068,19 @@ class WireAutomationService : AccessibilityService() {
                         
                         android.util.Log.d("WireAuto", "Send Clicked: Attempting to click send button")
                         
-                        // Method 1: Direct click on clickable parent using ACTION_CLICK
-                        if (sendButton.isClickable) {
+                        // Method 1: Use gesture dispatch instead of ACTION_CLICK (harder for Wire to block)
+                        clicked = clickNodeWithGesture(sendButton)
+                        android.util.Log.d("WireAuto", "Send Clicked: Method 1 - Gesture dispatch on send button: $clicked")
+                        android.util.Log.i("WireAuto", "Method 1 - Gesture dispatch on send button: $clicked")
+                        if (clicked) {
+                            val clickDelay = (1000..3000).random()
+                            delay(clickDelay.toLong())
+                        }
+                        
+                        // Fallback: Try ACTION_CLICK if gesture failed
+                        if (!clicked && sendButton.isClickable) {
                             clicked = sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            android.util.Log.d("WireAuto", "Send Clicked: Method 1 - Direct ACTION_CLICK on send button: $clicked")
-                            android.util.Log.i("WireAuto", "Method 1 - Direct click on send button: $clicked")
+                            android.util.Log.d("WireAuto", "Send Clicked: Method 1.5 - Fallback ACTION_CLICK: $clicked")
                             if (clicked) {
                                 val clickDelay = (1000..3000).random()
                                 delay(clickDelay.toLong())
@@ -1168,8 +1153,8 @@ class WireAutomationService : AccessibilityService() {
                             // Refresh root to check verification - try multiple times
                             var verificationPassed = false
                             for (verifyAttempt in 1..3) {
-                                currentRoot = rootInActiveWindow
-                                if (currentRoot != null && currentRoot.packageName == WIRE_PACKAGE) {
+                                currentRoot = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                                if (currentRoot != null) {
                                     val refreshedInput = findMessageInput(currentRoot)
                                     val inputText = refreshedInput?.text?.toString()?.trim() ?: ""
                                     
@@ -1251,9 +1236,9 @@ class WireAutomationService : AccessibilityService() {
                 // Go back to contacts list after sending (or if failed)
                 // This ensures we're ready for the next contact
                 android.util.Log.i("WireAuto", "STEP 4.${contactsProcessed}.7: Going back to contacts list...")
-                currentRoot = rootInActiveWindow
+                currentRoot = getRootWithRetry(maxRetries = 3, delayMs = 500)
                 
-                if (currentRoot != null && currentRoot.packageName == WIRE_PACKAGE) {
+                if (currentRoot != null) {
                     // Check if we're still in conversation (message input exists)
                     val stillInConversation = findMessageInput(currentRoot) != null
                     if (stillInConversation) {
@@ -1264,8 +1249,8 @@ class WireAutomationService : AccessibilityService() {
                         delay(backDelay.toLong())
                         
                         // Verify we're back on the list
-                        currentRoot = rootInActiveWindow
-                        if (currentRoot != null && currentRoot.packageName == WIRE_PACKAGE) {
+                        currentRoot = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                        if (currentRoot != null) {
                             val stillInConv = findMessageInput(currentRoot) != null
                             if (stillInConv) {
                                 android.util.Log.w("WireAuto", "Still in conversation after back, trying once more...")
@@ -1273,8 +1258,8 @@ class WireAutomationService : AccessibilityService() {
                                 delay(2000)
                                 
                                 // One more check
-                                currentRoot = rootInActiveWindow
-                                if (currentRoot != null && currentRoot.packageName == WIRE_PACKAGE) {
+                                currentRoot = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                                if (currentRoot != null) {
                                     val stillInConv2 = findMessageInput(currentRoot) != null
                                     if (stillInConv2) {
                                         android.util.Log.e("WireAuto", "Failed to exit conversation after multiple attempts")
@@ -1293,9 +1278,9 @@ class WireAutomationService : AccessibilityService() {
                     android.util.Log.w("WireAuto", "Not in Wire app after sending - waiting for recovery...")
                     // Wait and retry (NO relaunch - state machine prevents infinite loops)
                     delay(2000)
-                    currentRoot = rootInActiveWindow
+                    currentRoot = getRootWithRetry(maxRetries = 3, delayMs = 500)
                     
-                    if (currentRoot == null || currentRoot.packageName != WIRE_PACKAGE) {
+                    if (currentRoot == null) {
                         android.util.Log.w("WireAuto", "Still not in Wire app - may need manual intervention")
                         // Don't relaunch - let user handle it or continue with next contact
                     }
@@ -1786,6 +1771,127 @@ class WireAutomationService : AccessibilityService() {
         return null
     }
     
+    /**
+     * PERSISTENT ROOT NODE: Retry getting rootInActiveWindow at least 3 times with 500ms delay
+     */
+    private fun getRootWithRetry(maxRetries: Int = 3, delayMs: Long = 500): AccessibilityNodeInfo? {
+        for (attempt in 1..maxRetries) {
+            val root = rootInActiveWindow
+            if (root != null && root.packageName == WIRE_PACKAGE) {
+                android.util.Log.d("WireAuto", "Successfully got root node on attempt $attempt")
+                return root
+            }
+            if (attempt < maxRetries) {
+                android.util.Log.d("WireAuto", "Root node is null or wrong package on attempt $attempt, retrying in ${delayMs}ms...")
+                delay(delayMs)
+            }
+        }
+        android.util.Log.w("WireAuto", "Failed to get root node after $maxRetries attempts")
+        return null
+    }
+    
+    /**
+     * GENERIC LIST INTERACTION: Find first scrollable view and click first 3 children by coordinates
+     */
+    private fun clickFirstScrollableChildren(root: AccessibilityNodeInfo, maxChildren: Int = 3): Boolean {
+        android.util.Log.d("WireAuto", "Attempting generic list interaction - finding scrollable view...")
+        val scrollableView = findScrollableView(root)
+        
+        if (scrollableView == null) {
+            android.util.Log.w("WireAuto", "No scrollable view found for generic interaction")
+            return false
+        }
+        
+        android.util.Log.d("WireAuto", "Found scrollable view with ${scrollableView.childCount} children")
+        var clickedCount = 0
+        
+        // Click first 3 children by coordinates
+        for (i in 0 until minOf(scrollableView.childCount, maxChildren)) {
+            val child = scrollableView.getChild(i)
+            if (child != null) {
+                val bounds = android.graphics.Rect()
+                child.getBoundsInScreen(bounds)
+                
+                if (bounds.width() > 0 && bounds.height() > 0) {
+                    val centerX = bounds.centerX().toFloat()
+                    val centerY = bounds.centerY().toFloat()
+                    
+                    android.util.Log.d("WireAuto", "Clicking child $i at coordinates ($centerX, $centerY)")
+                    
+                    // Use gesture dispatch to click at center coordinates
+                    try {
+                        val path = android.graphics.Path()
+                        path.moveTo(centerX, centerY)
+                        val stroke = android.accessibilityservice.GestureDescription.StrokeDescription(
+                            path, 0, 200 // 200ms tap
+                        )
+                        val gesture = android.accessibilityservice.GestureDescription.Builder()
+                            .addStroke(stroke)
+                            .build()
+                        
+                        val clicked = dispatchGesture(gesture, object : android.accessibilityservice.AccessibilityService.GestureResultCallback() {
+                            override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                                android.util.Log.d("WireAuto", "Gesture completed for child $i")
+                            }
+                            override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                                android.util.Log.w("WireAuto", "Gesture cancelled for child $i")
+                            }
+                        }, null)
+                        
+                        if (clicked) {
+                            clickedCount++
+                            delay(1000) // Wait between clicks
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("WireAuto", "Error clicking child $i: ${e.message}")
+                    }
+                }
+            }
+        }
+        
+        android.util.Log.d("WireAuto", "Generic list interaction: clicked $clickedCount out of ${minOf(scrollableView.childCount, maxChildren)} children")
+        return clickedCount > 0
+    }
+    
+    /**
+     * Use GestureDispatch for clicking - harder for Wire to block
+     */
+    private fun clickNodeWithGesture(node: AccessibilityNodeInfo): Boolean {
+        val bounds = android.graphics.Rect()
+        node.getBoundsInScreen(bounds)
+        
+        if (bounds.width() <= 0 || bounds.height() <= 0) {
+            android.util.Log.w("WireAuto", "Invalid bounds for gesture click")
+            return false
+        }
+        
+        val centerX = bounds.centerX().toFloat()
+        val centerY = bounds.centerY().toFloat()
+        
+        try {
+            val path = android.graphics.Path()
+            path.moveTo(centerX, centerY)
+            val stroke = android.accessibilityservice.GestureDescription.StrokeDescription(
+                path, 0, 200 // 200ms tap
+            )
+            val gesture = android.accessibilityservice.GestureDescription.Builder()
+                .addStroke(stroke)
+                .build()
+            
+            return dispatchGesture(gesture, object : android.accessibilityservice.AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                    android.util.Log.d("WireAuto", "Gesture click completed")
+                }
+                override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                    android.util.Log.w("WireAuto", "Gesture click cancelled")
+                }
+            }, null)
+        } catch (e: Exception) {
+            android.util.Log.e("WireAuto", "Gesture click failed: ${e.message}")
+            return false
+        }
+    }
+    
     private fun navigateToConversationsList(root: AccessibilityNodeInfo) {
         // Try to find and click on "Conversations" or "Chats" tab/button
         val conversationsButton = findNodeByText(root, "Conversations")
@@ -1797,9 +1903,12 @@ class WireAutomationService : AccessibilityService() {
         if (conversationsButton != null) {
             val clickableNode = findClickableNode(conversationsButton)
             if (clickableNode != null) {
-                clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                android.util.Log.d("WireAuto", "Clicked on Conversations button")
+                // Use gesture dispatch instead of ACTION_CLICK
+                if (clickNodeWithGesture(clickableNode)) {
+                    android.util.Log.d("WireAuto", "Clicked on Conversations button via gesture")
+                    delay(500)
                 return
+                }
             }
         }
         
@@ -2713,7 +2822,7 @@ class WireAutomationService : AccessibilityService() {
             
             // If it's a ViewGroup/RelativeLayout with person's name and is clickable, it's likely a conversation row
             if (hasPersonName) {
-                val isClickable = node.isClickable || findClickableNode(node) != null
+        val isClickable = node.isClickable || findClickableNode(node) != null
                 if (isClickable) {
                     return true
                 }
