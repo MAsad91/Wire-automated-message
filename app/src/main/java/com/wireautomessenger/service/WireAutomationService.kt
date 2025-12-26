@@ -1362,6 +1362,8 @@ class WireAutomationService : AccessibilityService() {
                                         depth++
                                     }
                                 }
+                            } else {
+                                // Input is not blocked by keyboard, no action needed
                             }
                         }
                     }
