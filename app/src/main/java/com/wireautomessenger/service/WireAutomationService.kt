@@ -2721,6 +2721,7 @@ class WireAutomationService : AccessibilityService() {
         }
         
         // Original logic: Check if node or any child has meaningful text (contact name)
+        val hasText = text.isNotEmpty()
         var hasMeaningfulText = hasText && text.length >= 2
         if (!hasMeaningfulText) {
             // Check children for meaningful text
