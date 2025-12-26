@@ -6,6 +6,8 @@ import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.pm.PackageManager.NameNotFoundException
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
@@ -70,11 +72,16 @@ class WireAutomationService : AccessibilityService() {
         // This method only observes events, never launches apps
         // All app launching happens ONLY from user action (Start button) via onStartCommand
         try {
-            // Optional: Log window state changes for debugging (but don't act on them)
-            if (event != null && event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            // PACKAGE VERIFICATION: Explicitly verify package name matches Wire
+            if (event != null) {
                 val packageName = event.packageName?.toString()
-                if (packageName == WIRE_PACKAGE && isSendingInProgress.get()) {
-                    android.util.Log.d("WireAuto", "Wire app window state changed - package: $packageName")
+                if (packageName != null && packageName == WIRE_PACKAGE) {
+                    if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && isSendingInProgress.get()) {
+                        android.util.Log.d("WireAuto", "Wire app window state changed - verified package: $packageName")
+                    }
+                } else if (packageName != null && packageName != WIRE_PACKAGE) {
+                    // Log non-Wire packages for debugging (but don't act on them)
+                    android.util.Log.v("WireAuto", "Non-Wire package event: $packageName")
                 }
             }
         } catch (e: Exception) {
@@ -106,9 +113,12 @@ class WireAutomationService : AccessibilityService() {
                         // If foreground service fails, continue anyway
                         e.printStackTrace()
                     }
-                    scope.launch {
-                        sendMessagesToAllContacts()
-                    }
+                    // STABILITY HANDLER: Wrap in Handler().postDelayed() to prevent blocking main thread
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        scope.launch {
+                            sendMessagesToAllContacts()
+                        }
+                    }, 100) // Small delay to ensure service is fully initialized
                 }
             }
             START_NOT_STICKY
@@ -657,6 +667,19 @@ class WireAutomationService : AccessibilityService() {
                     }
                 }
                 
+                // PACKAGE VERIFICATION: Verify we're still in Wire app before interacting
+                if (currentRoot == null || currentRoot.packageName?.toString() != WIRE_PACKAGE) {
+                    android.util.Log.w("WireAuto", "Package verification failed: expected $WIRE_PACKAGE, got ${currentRoot?.packageName}")
+                    contactResults.add(com.wireautomessenger.model.ContactResult(
+                        name = contactName,
+                        status = com.wireautomessenger.model.ContactStatus.FAILED,
+                        errorMessage = "Package verification failed - not in Wire app",
+                        position = index + 1
+                    ))
+                    sendContactUpdate(contactName, "failed", index + 1, "Package verification failed")
+                    continue
+                }
+                
                 // Refresh the row item from current root (it might be stale)
                 // Get fresh RecyclerView and find the row at this index
                 var refreshedRowItem: AccessibilityNodeInfo? = null
@@ -843,16 +866,33 @@ class WireAutomationService : AccessibilityService() {
                         continue
                 }
 
+                // PACKAGE VERIFICATION: Verify we're still in Wire app before looking for message input
+                if (currentRoot == null || currentRoot.packageName?.toString() != WIRE_PACKAGE) {
+                    android.util.Log.w("WireAuto", "Package verification failed before message input search: expected $WIRE_PACKAGE, got ${currentRoot?.packageName}")
+                    contactResults.add(com.wireautomessenger.model.ContactResult(
+                        name = contactName,
+                        status = com.wireautomessenger.model.ContactStatus.FAILED,
+                        errorMessage = "Package verification failed - not in Wire app",
+                        position = index + 1
+                    ))
+                    sendContactUpdate(contactName, "failed", index + 1, "Package verification failed")
+                    continue
+                }
+                
                 // DON'T AUTO-EXIT: Wait up to 10 seconds for message input to appear
                 android.util.Log.d("WireAuto", "Waiting up to 10 seconds for message input to appear...")
-                var messageInput = findMessageInput(currentRoot)
+                var messageInput = findMessageInput(currentRoot!!)
                 var inputAttempts = 0
                 while (messageInput == null && inputAttempts < 10) {
                     android.util.Log.d("WireAuto", "Message input not found, waiting... (attempt ${inputAttempts + 1}/10)")
                     delay(1000)
                     currentRoot = getRootWithRetry(maxRetries = 3, delayMs = 500)
-                    if (currentRoot != null) {
-                        messageInput = findMessageInput(currentRoot)
+                    // PACKAGE VERIFICATION: Verify package before each attempt
+                    if (currentRoot != null && currentRoot.packageName?.toString() == WIRE_PACKAGE) {
+                        messageInput = findMessageInput(currentRoot!!)
+                    } else {
+                        android.util.Log.w("WireAuto", "Package verification failed during message input search")
+                        break
                     }
                     inputAttempts++
                 }
@@ -1786,14 +1826,44 @@ class WireAutomationService : AccessibilityService() {
     
     /**
      * PERSISTENT ROOT NODE: Retry getting rootInActiveWindow at least 3 times with 500ms delay
+     * Includes global action refresh when root is null
      */
     private suspend fun getRootWithRetry(maxRetries: Int = 3, delayMs: Long = 500): AccessibilityNodeInfo? {
         for (attempt in 1..maxRetries) {
-            val root = rootInActiveWindow
-            if (root != null && root.packageName == WIRE_PACKAGE) {
-                android.util.Log.d("WireAuto", "Successfully got root node on attempt $attempt")
-                return root
+            var root = rootInActiveWindow
+            
+            // GLOBAL ACTION REFRESH: If root is null, perform a dummy action to refresh window content
+            if (root == null) {
+                android.util.Log.d("WireAuto", "Root is null on attempt $attempt, performing global action refresh...")
+                try {
+                    // Use GLOBAL_ACTION_TAKE_SCREENSHOT as a dummy trigger to refresh window content
+                    // This doesn't actually take a screenshot but forces the system to refresh
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT)
+                    } else {
+                        // Fallback: perform a small scroll gesture or back action
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        delay(100)
+                        performGlobalAction(GLOBAL_ACTION_BACK) // Go back forward
+                    }
+                    delay(300) // Wait for refresh
+                    root = rootInActiveWindow
+                } catch (e: Exception) {
+                    android.util.Log.w("WireAuto", "Global action refresh failed: ${e.message}")
+                }
             }
+            
+            // PACKAGE VERIFICATION: Explicitly verify package name matches Wire
+            if (root != null) {
+                val packageName = root.packageName?.toString()
+                if (packageName == WIRE_PACKAGE) {
+                    android.util.Log.d("WireAuto", "Successfully got root node on attempt $attempt - verified package: $packageName")
+                    return root
+                } else {
+                    android.util.Log.d("WireAuto", "Root node has wrong package: $packageName (expected: $WIRE_PACKAGE)")
+                }
+            }
+            
             if (attempt < maxRetries) {
                 android.util.Log.d("WireAuto", "Root node is null or wrong package on attempt $attempt, retrying in ${delayMs}ms...")
                 delay(delayMs)
