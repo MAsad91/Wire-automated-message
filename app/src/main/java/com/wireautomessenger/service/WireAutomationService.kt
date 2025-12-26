@@ -1330,10 +1330,11 @@ class WireAutomationService : AccessibilityService() {
                         val inputBounds = android.graphics.Rect()
                         input.getBoundsInScreen(inputBounds)
                         val screenBounds = android.graphics.Rect()
-                        if (currentRoot == null) {
+                        val root = currentRoot // Capture in local variable for smart cast
+                        if (root == null) {
                             android.util.Log.w("WireAuto", "Current root is null, cannot check keyboard blocking")
                         } else {
-                            currentRoot.getBoundsInScreen(screenBounds)
+                            root.getBoundsInScreen(screenBounds)
                             
                             // Check if input is in bottom 30% of screen (likely blocked by keyboard)
                             val screenHeight = screenBounds.height()
