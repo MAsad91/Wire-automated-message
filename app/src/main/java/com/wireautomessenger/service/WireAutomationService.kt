@@ -898,6 +898,8 @@ class WireAutomationService : AccessibilityService() {
                 val debugInfo = if (rootNode != null) collectDebugInfo(rootNode!!) else "Root node is null"
                 val classNamesInfo = if (rootNode != null) collectClassNamesInfo(rootNode!!) else "Root node is null"
                 
+                dumpAccessibilityTree(rootNode, maxDepth = 5)
+
                 val errorMsg = "No contacts found in Wire app.\n\n" +
                         "📋 Troubleshooting Steps:\n\n" +
                         "1. Open Wire app manually first\n" +
@@ -3083,6 +3085,39 @@ class WireAutomationService : AccessibilityService() {
             val child = node.getChild(i)
             if (child != null) {
                 collectClassNamesRecursive(child, classNames, classNamesWithCount, depth + 1, maxElements)
+            }
+        }
+    }
+    
+    private fun dumpAccessibilityTree(root: AccessibilityNodeInfo?, maxDepth: Int = 4) {
+        if (root == null) {
+            debugLog("TREE", "Cannot dump tree - root is null")
+            return
+        }
+        debugLog("TREE", "=== Accessibility Tree Dump (maxDepth=$maxDepth) ===")
+        android.util.Log.d("WireAutoTree", "=== Accessibility Tree Dump (maxDepth=$maxDepth) ===")
+        dumpNodeRecursive(root, 0, maxDepth)
+        debugLog("TREE", "=== End of Tree Dump ===")
+    }
+
+    private fun dumpNodeRecursive(node: AccessibilityNodeInfo, depth: Int, maxDepth: Int) {
+        if (depth > maxDepth) return
+        val indent = "  ".repeat(depth)
+        val className = node.className?.toString() ?: "Unknown"
+        val text = node.text?.toString()?.replace("\n", " ") ?: ""
+        val desc = node.contentDescription?.toString()?.replace("\n", " ") ?: ""
+        val viewId = node.viewIdResourceName ?: ""
+        val bounds = android.graphics.Rect()
+        node.getBoundsInScreen(bounds)
+        val info = "$indent- $className | text='$text' | desc='$desc' | id='$viewId' | clickable=${node.isClickable} | children=${node.childCount} | bounds=$bounds"
+        debugLog("TREE", info)
+        android.util.Log.d("WireAutoTree", info)
+        if (depth < maxDepth) {
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i)
+                if (child != null) {
+                    dumpNodeRecursive(child, depth + 1, maxDepth)
+                }
             }
         }
     }
