@@ -435,8 +435,25 @@ class WireAutomationService : AccessibilityService() {
             debugLog("STATE", "Starting message sending process - isSendingInProgress=true")
             android.util.Log.i("WireAuto", "Starting message sending process - State: isSendingInProgress=true")
             
-            debugLog("ACTION", "STEP 3: Calling sendMessagesViaSearch with message length: ${message.length}")
-            sendMessagesViaSearch(message)
+            debugLog("ACTION", "STEP 3: Starting automation flow with contact discovery")
+            // Phase 0: Contact Discovery - Discover contacts from home screen first
+            val discoveredContacts = discoverContactsFromHomeScreen()
+            
+            if (discoveredContacts.isEmpty()) {
+                android.util.Log.e("WireAuto", "No contacts discovered from home screen")
+                debugLog("ERROR", "No contacts discovered - cannot proceed")
+                sendErrorBroadcast("No contacts found in Wire. Please ensure you have conversations.")
+                resetState()
+                return
+            }
+            
+            // Human mimicry: Delay before starting search process
+            debugLog("PHASE0", "Contact discovery complete. Human mimicry delay: 2-3 seconds")
+            val humanDelay = (2000..3000).random()
+            delay(humanDelay.toLong())
+            
+            debugLog("ACTION", "Calling sendMessagesViaSearch with ${discoveredContacts.size} discovered contacts")
+            sendMessagesViaSearch(message, discoveredContacts)
 
                 } catch (e: Exception) {
             val errorMsg = "Error: ${e.message ?: "Unknown error"}"
@@ -4215,10 +4232,259 @@ class WireAutomationService : AccessibilityService() {
     }
 
     /**
+     * Phase 0: Contact Discovery
+     * Scans the Wire home screen (conversation list) to discover all contact names
+     */
+    private suspend fun discoverContactsFromHomeScreen(): List<String> {
+        android.util.Log.i("WireAuto", "=== PHASE 0: Starting contact discovery ===")
+        debugLog("PHASE0", "=== PHASE 0: Starting contact discovery from home screen ===")
+        
+        updateNotification("Discovering contacts...")
+        sendProgressBroadcast("Discovering contacts from conversation list...")
+        
+        val discoveredContacts = mutableSetOf<String>()
+        var root = getRootWithRetry(maxRetries = 5, delayMs = 500)
+        
+        if (root == null || root.packageName != WIRE_PACKAGE) {
+            android.util.Log.e("WireAuto", "Cannot access Wire app for contact discovery")
+            debugLog("ERROR", "Cannot access Wire app for contact discovery")
+            return emptyList()
+        }
+        
+        // Ensure we're on the home/conversations screen
+        debugLog("PHASE0", "Ensuring we're on the home screen...")
+        navigateToConversationsList(root)
+        delay(2000) // Wait for navigation
+        
+        root = getRootWithRetry(maxRetries = 5, delayMs = 500)
+        if (root == null || root.packageName != WIRE_PACKAGE) {
+            android.util.Log.e("WireAuto", "Lost access after navigation")
+            return emptyList()
+        }
+        
+        val maxContactsToDiscover = 100
+        var scrollAttempts = 0
+        val maxScrollAttempts = 10
+        val lastContactCount = mutableListOf<Int>()
+        
+        // Discovery loop: Extract contacts and scroll to find more
+        while (discoveredContacts.size < maxContactsToDiscover && scrollAttempts < maxScrollAttempts) {
+            debugLog("PHASE0", "Discovery iteration ${scrollAttempts + 1}: Currently found ${discoveredContacts.size} contacts")
+            updateNotification("Discovering contacts... (${discoveredContacts.size} found)")
+            
+            // Extract contact names from current view
+            val contactsInView = extractContactNamesFromView(root)
+            val beforeCount = discoveredContacts.size
+            discoveredContacts.addAll(contactsInView)
+            val newContacts = discoveredContacts.size - beforeCount
+            
+            android.util.Log.d("WireAuto", "Found $newContacts new contacts in current view (total: ${discoveredContacts.size})")
+            debugLog("PHASE0", "Found $newContacts new contacts in current view (total: ${discoveredContacts.size})")
+            
+            // Track contact count to detect if we've reached the end
+            lastContactCount.add(discoveredContacts.size)
+            if (lastContactCount.size > 3) {
+                lastContactCount.removeAt(0)
+            }
+            
+            // Check if we've reached the end (no new contacts in last 3 scrolls)
+            if (lastContactCount.size == 3 && lastContactCount[0] == lastContactCount[1] && lastContactCount[1] == lastContactCount[2]) {
+                android.util.Log.i("WireAuto", "No new contacts found in last 3 scrolls - reached end of list")
+                debugLog("PHASE0", "Reached end of contact list - no new contacts in last 3 scrolls")
+                break
+            }
+            
+            // Perform slow scroll to discover more contacts
+            if (discoveredContacts.size < maxContactsToDiscover && scrollAttempts < maxScrollAttempts) {
+                debugLog("PHASE0", "Performing slow scroll to discover more contacts...")
+                val scrolled = performSlowScroll(root)
+                if (!scrolled) {
+                    android.util.Log.w("WireAuto", "Could not scroll further - may have reached end")
+                    debugLog("PHASE0", "Could not scroll further - may have reached end")
+                    break
+                }
+                delay(1500) // Wait for new contacts to load
+                scrollAttempts++
+                
+                // Refresh root after scroll
+                root = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                if (root == null || root.packageName != WIRE_PACKAGE) {
+                    android.util.Log.w("WireAuto", "Lost access after scroll")
+                    break
+                }
+            }
+        }
+        
+        val contactList = discoveredContacts.toList().sorted()
+        android.util.Log.i("WireAuto", "=== Contact discovery complete: Found ${contactList.size} unique contacts ===")
+        debugLog("PHASE0", "Contact discovery complete: Found ${contactList.size} unique contacts")
+        debugLog("PHASE0", "Discovered contacts: ${contactList.take(10).joinToString(", ")}${if (contactList.size > 10) "..." else ""}")
+        
+        return contactList
+    }
+    
+    /**
+     * Extract contact names from TextView elements in the current view
+     */
+    private fun extractContactNamesFromView(root: AccessibilityNodeInfo): Set<String> {
+        val contactNames = mutableSetOf<String>()
+        val allTextViews = mutableListOf<AccessibilityNodeInfo>()
+        
+        // Find all TextView elements
+        findAllNodesByClassName(root, "android.widget.TextView", allTextViews)
+        findAllNodesByClassName(root, "androidx.appcompat.widget.AppCompatTextView", allTextViews)
+        
+        for (textView in allTextViews) {
+            val text = textView.text?.toString()?.trim() ?: ""
+            val contentDesc = textView.contentDescription?.toString()?.trim() ?: ""
+            
+            // Skip empty text
+            if (text.isEmpty() && contentDesc.isEmpty()) continue
+            
+            // Skip common UI elements that are not contact names
+            val lowerText = text.lowercase()
+            val lowerDesc = contentDesc.lowercase()
+            
+            if (lowerText.contains("search") || 
+                lowerText.contains("conversation") || 
+                lowerText.contains("chat") ||
+                lowerText.contains("message") ||
+                lowerText.contains("new") ||
+                lowerText.contains("add") ||
+                lowerText.contains("settings") ||
+                lowerText.contains("profile") ||
+                lowerText.matches(Regex("^\\d+$")) || // Skip pure numbers
+                lowerText.length < 2) { // Skip very short text
+                continue
+            }
+            
+            // Check if this TextView is part of a clickable contact row
+            var parent = textView.parent
+            var isInContactRow = false
+            var depth = 0
+            while (parent != null && depth < 5) {
+                if (parent.isClickable) {
+                    isInContactRow = true
+                    break
+                }
+                parent = parent.parent
+                depth++
+            }
+            
+            // If it's in a clickable row and has meaningful text, it's likely a contact name
+            if (isInContactRow && text.length >= 2 && text.length <= 100) {
+                // Clean the name (remove common prefixes like "You: ", timestamps, etc.)
+                val cleanName = cleanContactName(text)
+                if (cleanName.isNotBlank() && cleanName.length >= 2) {
+                    contactNames.add(cleanName)
+                }
+            }
+            
+            // Also check content description
+            if (contentDesc.isNotBlank() && contentDesc.length >= 2 && contentDesc.length <= 100) {
+                val cleanDesc = cleanContactName(contentDesc)
+                if (cleanDesc.isNotBlank() && cleanDesc.length >= 2) {
+                    contactNames.add(cleanDesc)
+                }
+            }
+        }
+        
+        return contactNames
+    }
+    
+    /**
+     * Clean contact name by removing common prefixes and suffixes
+     */
+    private fun cleanContactName(name: String): String {
+        var cleaned = name.trim()
+        
+        // Remove common prefixes
+        val prefixes = listOf("You: ", "you: ", "You ", "you ", "New: ", "new: ")
+        for (prefix in prefixes) {
+            if (cleaned.startsWith(prefix, ignoreCase = true)) {
+                cleaned = cleaned.substring(prefix.length).trim()
+            }
+        }
+        
+        // Remove timestamps and dates (patterns like "12:34", "Today", "Yesterday", etc.)
+        cleaned = cleaned.replace(Regex("\\s*\\d{1,2}:\\d{2}\\s*$"), "") // Remove time at end
+        cleaned = cleaned.replace(Regex("\\s*(Today|Yesterday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\\s*$", RegexOption.IGNORE_CASE), "")
+        
+        // Remove extra whitespace
+        cleaned = cleaned.replace(Regex("\\s+"), " ").trim()
+        
+        return cleaned
+    }
+    
+    /**
+     * Perform slow scroll using GestureDescription (human-like scrolling)
+     */
+    private suspend fun performSlowScroll(root: AccessibilityNodeInfo): Boolean {
+        try {
+            val scrollableView = findScrollableView(root)
+            if (scrollableView == null) {
+                android.util.Log.w("WireAuto", "No scrollable view found")
+                return false
+            }
+            
+            val bounds = android.graphics.Rect()
+            scrollableView.getBoundsInScreen(bounds)
+            
+            if (bounds.width() <= 0 || bounds.height() <= 0) {
+                return false
+            }
+            
+            // Calculate scroll coordinates (center of view, scroll down)
+            val startX = bounds.centerX().toFloat()
+            val startY = bounds.centerY().toFloat()
+            val endY = startY - 300f // Scroll up by 300px (slow scroll)
+            
+            val path = android.graphics.Path()
+            path.moveTo(startX, startY)
+            path.lineTo(startX, endY)
+            
+            // Slow scroll: 800ms duration for smooth, human-like movement
+            val stroke = android.accessibilityservice.GestureDescription.StrokeDescription(
+                path, 0, 800
+            )
+            
+            val gesture = android.accessibilityservice.GestureDescription.Builder()
+                .addStroke(stroke)
+                .build()
+            
+            var gestureCompleted = false
+            val gestureResult = dispatchGesture(gesture, object : android.accessibilityservice.AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                    gestureCompleted = true
+                    android.util.Log.d("WireAuto", "Slow scroll gesture completed")
+                }
+                override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                    android.util.Log.w("WireAuto", "Slow scroll gesture cancelled")
+                }
+            }, null)
+            
+            if (gestureResult) {
+                // Wait for gesture to complete
+                var waitAttempts = 0
+                while (!gestureCompleted && waitAttempts < 10) {
+                    delay(100)
+                    waitAttempts++
+                }
+                return true
+            }
+            
+            return false
+        } catch (e: Exception) {
+            android.util.Log.e("WireAuto", "Error performing slow scroll: ${e.message}", e)
+            return false
+        }
+    }
+    
+    /**
      * NEW SEARCH-BASED IMPLEMENTATION
      * Phase 1-6: Complete automation with search, human mimicry, batching, and anti-ban strategies
      */
-    private suspend fun sendMessagesViaSearch(message: String) {
+    private suspend fun sendMessagesViaSearch(message: String, contactNames: List<String>) {
         android.util.Log.i("WireAuto", "=== PHASE 1: Starting search-based message sending ===")
         debugLog("EVENT", "=== PHASE 1: Starting search-based message sending ===")
         
@@ -4228,23 +4494,6 @@ class WireAutomationService : AccessibilityService() {
         sendProgressBroadcast("Waiting for Wire to sync...")
         debugLog("PHASE1", "Bootstrap delay: 3000ms to allow app to sync messages")
         delay(3000)
-        
-        // Get contact list from preferences or use a default list
-        val contactListJson = prefs.getString("contact_list", null)
-        val contactNames = if (contactListJson != null) {
-            try {
-                // Parse JSON array of contact names
-                val gson = com.google.gson.Gson()
-                val type = object : com.google.gson.reflect.TypeToken<List<String>>() {}.type
-                gson.fromJson<List<String>>(contactListJson, type) ?: emptyList()
-            } catch (e: Exception) {
-                android.util.Log.e("WireAuto", "Failed to parse contact list: ${e.message}")
-                emptyList()
-            }
-        } else {
-            // Fallback: Get contacts from the current conversations list
-            getContactsFromConversationsList()
-        }
         
         if (contactNames.isEmpty()) {
             android.util.Log.e("WireAuto", "No contacts found to send messages to")
