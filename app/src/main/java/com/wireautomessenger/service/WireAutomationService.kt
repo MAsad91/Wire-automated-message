@@ -4272,8 +4272,14 @@ class WireAutomationService : AccessibilityService() {
             debugLog("PHASE0", "Discovery iteration ${scrollAttempts + 1}: Currently found ${discoveredContacts.size} contacts")
             updateNotification("Discovering contacts... (${discoveredContacts.size} found)")
             
-            // Extract contact names from current view
-            val contactsInView = extractContactNamesFromView(root)
+            // Extract contact names from current view - verify root is not null
+            if (root == null) {
+                android.util.Log.w("WireAuto", "Root is null during contact discovery, breaking loop")
+                debugLog("PHASE0", "Root is null, breaking discovery loop")
+                break
+            }
+            
+            val contactsInView = extractContactNamesFromView(root!!)
             val beforeCount = discoveredContacts.size
             discoveredContacts.addAll(contactsInView)
             val newContacts = discoveredContacts.size - beforeCount
@@ -4297,7 +4303,7 @@ class WireAutomationService : AccessibilityService() {
             // Perform slow scroll to discover more contacts
             if (discoveredContacts.size < maxContactsToDiscover && scrollAttempts < maxScrollAttempts) {
                 debugLog("PHASE0", "Performing slow scroll to discover more contacts...")
-                val scrolled = performSlowScroll(root)
+                val scrolled = performSlowScroll(root!!)
                 if (!scrolled) {
                     android.util.Log.w("WireAuto", "Could not scroll further - may have reached end")
                     debugLog("PHASE0", "Could not scroll further - may have reached end")
