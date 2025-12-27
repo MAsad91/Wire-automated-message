@@ -305,13 +305,18 @@ class WireAutomationService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        // Service interrupted - reset all state flags
+        // Service interrupted - reset all state flags and clear session data
         // This method must not throw exceptions
         try {
-            android.util.Log.w("WireAuto", "Service interrupted - resetting state")
+            android.util.Log.w("WireAuto", "Service interrupted - resetting state and clearing session data")
             isRunning.set(false)
             isWireOpened.set(false)
             isSendingInProgress.set(false)
+            
+            // Clear session data for repeatable runs
+            sessionSentList.clear()
+            lastPersonMessaged = null
+            debugLog("STATE", "Service interrupted - session data cleared")
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -379,10 +384,14 @@ class WireAutomationService : AccessibilityService() {
             return
         }
 
-        // Reset state flags
+        // Reset state flags and clear session data for fresh scan-then-send flow
         isWireOpened.set(false)
         isSendingInProgress.set(false)
+        sessionSentList.clear()
+        lastPersonMessaged = null
         debugLog("STATE", "State flags reset - isWireOpened: false, isSendingInProgress: false")
+        debugLog("SESSION", "Session data cleared for fresh contact discovery: sessionSentList and lastPersonMessaged reset")
+        android.util.Log.i("WireAuto", "Session data cleared for fresh scan-then-send flow")
 
         try {
             val message = prefs.getString("pending_message", "") ?: ""
@@ -648,13 +657,19 @@ class WireAutomationService : AccessibilityService() {
     }
 
     /**
-     * Reset all state flags
+     * Reset all state flags and clear session data
      */
     private fun resetState() {
-        android.util.Log.i("WireAuto", "Resetting state flags")
-            isRunning.set(false)
+        android.util.Log.i("WireAuto", "Resetting state flags and clearing session data")
+        isRunning.set(false)
         isWireOpened.set(false)
         isSendingInProgress.set(false)
+        
+        // Clear session data for repeatable runs
+        sessionSentList.clear()
+        lastPersonMessaged = null
+        debugLog("STATE", "Session data cleared: sessionSentList and lastPersonMessaged reset")
+        android.util.Log.i("WireAuto", "Session data cleared for repeatable runs")
     }
 
     /**
@@ -4276,15 +4291,21 @@ class WireAutomationService : AccessibilityService() {
 
     /**
      * Phase 0: Contact Discovery
-     * Scans the Wire home screen (conversation list) to discover all contact names
+     * Scans the Wire home screen (conversation list) to discover all contact names.
+     * 
+     * IMPORTANT: This function always starts with a fresh scan - it builds a new
+     * discoveredContacts list from scratch each time it's called, ensuring repeatable
+     * session capability. The sessionSentList is cleared at the start of each run
+     * to allow unlimited runs per day.
      */
     private suspend fun discoverContactsFromHomeScreen(): ArrayList<String> {
-        android.util.Log.i("WireAuto", "=== PHASE 0: Starting contact discovery (Scan-then-Send) ===")
-        debugLog("PHASE0", "=== PHASE 0: Starting contact discovery from home screen (Scan-then-Send) ===")
+        android.util.Log.i("WireAuto", "=== PHASE 0: Starting fresh contact discovery (Scan-then-Send) ===")
+        debugLog("PHASE0", "=== PHASE 0: Starting fresh contact discovery from home screen (Scan-then-Send) ===")
         
         updateNotification("Scanning contacts...")
         sendProgressBroadcast("Scanning conversation list...")
         
+        // Always start with a fresh, empty set for repeatable runs
         val discoveredContacts = mutableSetOf<String>()
         var root = getRootWithRetry(maxRetries = 5, delayMs = 500)
         
@@ -4864,8 +4885,9 @@ class WireAutomationService : AccessibilityService() {
                     delay(randomDelay.toLong())
                     
                 } catch (e: Exception) {
+                    // Self-Correction: Log error and continue to next contact instead of stopping
                     android.util.Log.e("WireAuto", "Error processing contact $contactName: ${e.message}", e)
-                    debugLog("ERROR", "Error processing contact $contactName: ${e.message}", e)
+                    debugLog("ERROR", "Error processing contact $contactName: ${e.message} - continuing to next contact", e)
                     contactResults.add(com.wireautomessenger.model.ContactResult(
                         name = contactName,
                         status = com.wireautomessenger.model.ContactStatus.FAILED,
@@ -4875,6 +4897,14 @@ class WireAutomationService : AccessibilityService() {
                     reportWriter.append("${dateFormat.format(Date())} | ERROR | $contactName | ${e.message}\n")
                     reportWriter.flush() // Flush to ensure report is updated immediately after each contact
                     sendContactUpdate(contactName, "failed", globalIndex + 1, "Exception: ${e.message}")
+                    
+                    // Ensure we return to main screen even on error to continue with next contact
+                    try {
+                        returnToMainScreen()
+                        delay(1000) // Brief delay before next contact
+                    } catch (e2: Exception) {
+                        android.util.Log.w("WireAuto", "Error returning to main screen after contact failure: ${e2.message}")
+                    }
                 }
             }
             

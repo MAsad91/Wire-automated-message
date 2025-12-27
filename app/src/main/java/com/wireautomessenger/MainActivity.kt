@@ -860,6 +860,11 @@ class MainActivity : AppCompatActivity() {
             // Reset UI after 5 seconds (longer to allow viewing results)
             btnSendNow.postDelayed({
                 resetSendingUI()
+                // Clear message field for repeatable runs
+                etMessage.setText("")
+                etMessage.clearFocus()
+                // Clear saved message
+                prefs.edit().putString("saved_message", "").apply()
             }, 5000)
         }
     }
@@ -880,6 +885,9 @@ class MainActivity : AppCompatActivity() {
             // Show detailed error dialog with scrollable text
             showDetailedErrorDialog(errorMessage)
             updateDebugButtons()
+            
+            // Ensure sending flag is cleared (in case service didn't reset properly)
+            prefs.edit().putBoolean("sending_complete", false).apply()
         }
     }
     
@@ -1194,6 +1202,12 @@ class MainActivity : AppCompatActivity() {
             btnSendNow.isEnabled = true
             switchSchedule.isEnabled = true
             tvStatus.setTextColor(getColor(R.color.on_surface))
+            
+            // Ensure sending flags are cleared for repeatable runs
+            prefs.edit()
+                .putBoolean("sending_complete", false)
+                .putInt("last_contacts_sent", 0)
+                .apply()
         }
     }
 
