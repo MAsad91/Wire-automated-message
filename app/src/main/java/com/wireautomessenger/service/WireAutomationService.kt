@@ -4235,12 +4235,12 @@ class WireAutomationService : AccessibilityService() {
      * Phase 0: Contact Discovery
      * Scans the Wire home screen (conversation list) to discover all contact names
      */
-    private suspend fun discoverContactsFromHomeScreen(): List<String> {
-        android.util.Log.i("WireAuto", "=== PHASE 0: Starting contact discovery ===")
-        debugLog("PHASE0", "=== PHASE 0: Starting contact discovery from home screen ===")
+    private suspend fun discoverContactsFromHomeScreen(): ArrayList<String> {
+        android.util.Log.i("WireAuto", "=== PHASE 0: Starting contact discovery (Scan-then-Send) ===")
+        debugLog("PHASE0", "=== PHASE 0: Starting contact discovery from home screen (Scan-then-Send) ===")
         
-        updateNotification("Discovering contacts...")
-        sendProgressBroadcast("Discovering contacts from conversation list...")
+        updateNotification("Scanning contacts...")
+        sendProgressBroadcast("Scanning conversation list...")
         
         val discoveredContacts = mutableSetOf<String>()
         var root = getRootWithRetry(maxRetries = 5, delayMs = 500)
@@ -4248,7 +4248,7 @@ class WireAutomationService : AccessibilityService() {
         if (root == null || root.packageName != WIRE_PACKAGE) {
             android.util.Log.e("WireAuto", "Cannot access Wire app for contact discovery")
             debugLog("ERROR", "Cannot access Wire app for contact discovery")
-            return emptyList()
+            return ArrayList()
         }
         
         // Ensure we're on the home/conversations screen
@@ -4259,71 +4259,65 @@ class WireAutomationService : AccessibilityService() {
         root = getRootWithRetry(maxRetries = 5, delayMs = 500)
         if (root == null || root.packageName != WIRE_PACKAGE) {
             android.util.Log.e("WireAuto", "Lost access after navigation")
-            return emptyList()
+            return ArrayList()
         }
         
-        val maxContactsToDiscover = 100
-        var scrollAttempts = 0
-        val maxScrollAttempts = 10
-        val lastContactCount = mutableListOf<Int>()
+        // Step 1: Extract contacts from initial view (before scrolling)
+        debugLog("PHASE0", "Extracting contacts from initial view...")
+        val initialContacts = extractContactNamesFromView(root)
+        discoveredContacts.addAll(initialContacts)
+        android.util.Log.d("WireAuto", "Found ${initialContacts.size} contacts in initial view")
+        debugLog("PHASE0", "Found ${initialContacts.size} contacts in initial view")
         
-        // Discovery loop: Extract contacts and scroll to find more
-        while (discoveredContacts.size < maxContactsToDiscover && scrollAttempts < maxScrollAttempts) {
-            debugLog("PHASE0", "Discovery iteration ${scrollAttempts + 1}: Currently found ${discoveredContacts.size} contacts")
-            updateNotification("Discovering contacts... (${discoveredContacts.size} found)")
+        // Step 2: Scroll down slowly 3-5 times to discover more contacts
+        val scrollCount = (3..5).random() // Random between 3-5 scrolls
+        android.util.Log.i("WireAuto", "Will perform $scrollCount slow scrolls to discover more contacts")
+        debugLog("PHASE0", "Will perform $scrollCount slow scrolls to discover more contacts")
+        
+        for (scrollIndex in 1..scrollCount) {
+            debugLog("PHASE0", "Scroll ${scrollIndex}/$scrollCount: Currently found ${discoveredContacts.size} unique contacts")
+            updateNotification("Scanning contacts... (${discoveredContacts.size} found, scroll $scrollIndex/$scrollCount)")
             
-            // Extract contact names from current view - verify root is not null
-            if (root == null) {
-                android.util.Log.w("WireAuto", "Root is null during contact discovery, breaking loop")
-                debugLog("PHASE0", "Root is null, breaking discovery loop")
+            // Perform slow scroll down
+            debugLog("PHASE0", "Performing slow scroll down...")
+            val scrolled = performSlowScroll(root)
+            if (!scrolled) {
+                android.util.Log.w("WireAuto", "Could not scroll further at scroll $scrollIndex")
+                debugLog("PHASE0", "Could not scroll further at scroll $scrollIndex")
                 break
             }
             
-            val contactsInView = extractContactNamesFromView(root!!)
+            // Wait for new contacts to load after scroll
+            delay(2000) // Increased delay for better loading
+            
+            // Refresh root after scroll
+            root = getRootWithRetry(maxRetries = 3, delayMs = 500)
+            if (root == null || root.packageName != WIRE_PACKAGE) {
+                android.util.Log.w("WireAuto", "Lost access after scroll $scrollIndex")
+                debugLog("PHASE0", "Lost access after scroll $scrollIndex")
+                break
+            }
+            
+            // Extract contacts from current view after scroll
+            val contactsAfterScroll = extractContactNamesFromView(root)
             val beforeCount = discoveredContacts.size
-            discoveredContacts.addAll(contactsInView)
+            discoveredContacts.addAll(contactsAfterScroll)
             val newContacts = discoveredContacts.size - beforeCount
             
-            android.util.Log.d("WireAuto", "Found $newContacts new contacts in current view (total: ${discoveredContacts.size})")
-            debugLog("PHASE0", "Found $newContacts new contacts in current view (total: ${discoveredContacts.size})")
-            
-            // Track contact count to detect if we've reached the end
-            lastContactCount.add(discoveredContacts.size)
-            if (lastContactCount.size > 3) {
-                lastContactCount.removeAt(0)
-            }
-            
-            // Check if we've reached the end (no new contacts in last 3 scrolls)
-            if (lastContactCount.size == 3 && lastContactCount[0] == lastContactCount[1] && lastContactCount[1] == lastContactCount[2]) {
-                android.util.Log.i("WireAuto", "No new contacts found in last 3 scrolls - reached end of list")
-                debugLog("PHASE0", "Reached end of contact list - no new contacts in last 3 scrolls")
-                break
-            }
-            
-            // Perform slow scroll to discover more contacts
-            if (discoveredContacts.size < maxContactsToDiscover && scrollAttempts < maxScrollAttempts) {
-                debugLog("PHASE0", "Performing slow scroll to discover more contacts...")
-                val scrolled = performSlowScroll(root!!)
-                if (!scrolled) {
-                    android.util.Log.w("WireAuto", "Could not scroll further - may have reached end")
-                    debugLog("PHASE0", "Could not scroll further - may have reached end")
-                    break
-                }
-                delay(1500) // Wait for new contacts to load
-                scrollAttempts++
-                
-                // Refresh root after scroll
-                root = getRootWithRetry(maxRetries = 3, delayMs = 500)
-                if (root == null || root.packageName != WIRE_PACKAGE) {
-                    android.util.Log.w("WireAuto", "Lost access after scroll")
-                    break
-                }
-            }
+            android.util.Log.d("WireAuto", "After scroll $scrollIndex: Found $newContacts new contacts (total: ${discoveredContacts.size})")
+            debugLog("PHASE0", "After scroll $scrollIndex: Found $newContacts new contacts (total: ${discoveredContacts.size})")
         }
         
-        val contactList = discoveredContacts.toList().sorted()
-        android.util.Log.i("WireAuto", "=== Contact discovery complete: Found ${contactList.size} unique contacts ===")
-        debugLog("PHASE0", "Contact discovery complete: Found ${contactList.size} unique contacts")
+        // Step 3: Filter out guest contacts and create ArrayList
+        val filteredContacts = discoveredContacts.filter { contactName ->
+            val lowerName = contactName.lowercase()
+            !lowerName.contains("guest") && contactName.isNotBlank()
+        }
+        
+        val contactList = ArrayList(filteredContacts.sorted())
+        
+        android.util.Log.i("WireAuto", "=== Contact discovery complete: Found ${contactList.size} unique contacts (after filtering guests) ===")
+        debugLog("PHASE0", "Contact discovery complete: Found ${contactList.size} unique contacts (after filtering guests)")
         debugLog("PHASE0", "Discovered contacts: ${contactList.take(10).joinToString(", ")}${if (contactList.size > 10) "..." else ""}")
         
         return contactList
@@ -4351,6 +4345,7 @@ class WireAutomationService : AccessibilityService() {
             val lowerText = text.lowercase()
             val lowerDesc = contentDesc.lowercase()
             
+            // Filter out guest contacts and common UI elements
             if (lowerText.contains("search") || 
                 lowerText.contains("conversation") || 
                 lowerText.contains("chat") ||
@@ -4359,8 +4354,14 @@ class WireAutomationService : AccessibilityService() {
                 lowerText.contains("add") ||
                 lowerText.contains("settings") ||
                 lowerText.contains("profile") ||
+                lowerText.contains("guest") || // Filter out guest contacts
                 lowerText.matches(Regex("^\\d+$")) || // Skip pure numbers
                 lowerText.length < 2) { // Skip very short text
+                continue
+            }
+            
+            // Also filter guest from content description
+            if (lowerDesc.contains("guest")) {
                 continue
             }
             
@@ -4381,7 +4382,8 @@ class WireAutomationService : AccessibilityService() {
             if (isInContactRow && text.length >= 2 && text.length <= 100) {
                 // Clean the name (remove common prefixes like "You: ", timestamps, etc.)
                 val cleanName = cleanContactName(text)
-                if (cleanName.isNotBlank() && cleanName.length >= 2) {
+                // Filter out guest contacts
+                if (cleanName.isNotBlank() && cleanName.length >= 2 && !cleanName.lowercase().contains("guest")) {
                     contactNames.add(cleanName)
                 }
             }
@@ -4389,7 +4391,8 @@ class WireAutomationService : AccessibilityService() {
             // Also check content description
             if (contentDesc.isNotBlank() && contentDesc.length >= 2 && contentDesc.length <= 100) {
                 val cleanDesc = cleanContactName(contentDesc)
-                if (cleanDesc.isNotBlank() && cleanDesc.length >= 2) {
+                // Filter out guest contacts
+                if (cleanDesc.isNotBlank() && cleanDesc.length >= 2 && !cleanDesc.lowercase().contains("guest")) {
                     contactNames.add(cleanDesc)
                 }
             }
@@ -4519,11 +4522,13 @@ class WireAutomationService : AccessibilityService() {
         val contactResults = mutableListOf<com.wireautomessenger.model.ContactResult>()
         val reportFile = File(getExternalFilesDir(null), "automation_report.txt")
         
-        // Initialize report file
-        reportFile.writeText("=== Wire Automation Report ===\n")
-        reportFile.appendText("Start Time: ${dateFormat.format(Date())}\n")
-        reportFile.appendText("Total Contacts: ${contactNames.size}\n")
-        reportFile.appendText("Message: ${message.take(100)}${if (message.length > 100) "..." else ""}\n\n")
+        // Initialize report file with FileWriter for proper flushing
+        val reportWriter = FileWriter(reportFile, false) // false = overwrite, true = append
+        reportWriter.append("=== Wire Automation Report ===\n")
+        reportWriter.append("Start Time: ${dateFormat.format(Date())}\n")
+        reportWriter.append("Total Contacts: ${contactNames.size}\n")
+        reportWriter.append("Message: ${message.take(100)}${if (message.length > 100) "..." else ""}\n\n")
+        reportWriter.flush()
         
         // Process contacts in batches
         for (batchStart in contactNames.indices step batchSize) {
@@ -4557,7 +4562,8 @@ class WireAutomationService : AccessibilityService() {
                             errorMessage = "Contact not found in search",
                             position = globalIndex + 1
                         ))
-                        reportFile.appendText("${dateFormat.format(Date())} | FAILED | $contactName | Contact not found\n")
+                        reportWriter.append("${dateFormat.format(Date())} | FAILED | $contactName | Contact not found\n")
+                        reportWriter.flush() // Flush to ensure report is updated immediately after each contact
                         sendContactUpdate(contactName, "failed", globalIndex + 1, "Contact not found")
                         continue
                     }
@@ -4573,7 +4579,8 @@ class WireAutomationService : AccessibilityService() {
                             errorMessage = null,
                             position = globalIndex + 1
                         ))
-                        reportFile.appendText("${dateFormat.format(Date())} | SUCCESS | $contactName | Message sent\n")
+                        reportWriter.append("${dateFormat.format(Date())} | SUCCESS | $contactName | Message sent\n")
+                        reportWriter.flush() // Flush to ensure report is updated immediately after each contact
                         sendContactUpdate(contactName, "sent", globalIndex + 1, null)
                         debugLog("SUCCESS", "Message sent successfully to $contactName")
                     } else {
@@ -4583,7 +4590,8 @@ class WireAutomationService : AccessibilityService() {
                             errorMessage = "Failed to send message",
                             position = globalIndex + 1
                         ))
-                        reportFile.appendText("${dateFormat.format(Date())} | FAILED | $contactName | Failed to send message\n")
+                        reportWriter.append("${dateFormat.format(Date())} | FAILED | $contactName | Failed to send message\n")
+                        reportWriter.flush() // Flush to ensure report is updated immediately after each contact
                         sendContactUpdate(contactName, "failed", globalIndex + 1, "Failed to send message")
                     }
                     
@@ -4604,7 +4612,8 @@ class WireAutomationService : AccessibilityService() {
                         errorMessage = "Exception: ${e.message}",
                         position = globalIndex + 1
                     ))
-                    reportFile.appendText("${dateFormat.format(Date())} | ERROR | $contactName | ${e.message}\n")
+                    reportWriter.append("${dateFormat.format(Date())} | ERROR | $contactName | ${e.message}\n")
+                    reportWriter.flush() // Flush to ensure report is updated immediately after each contact
                     sendContactUpdate(contactName, "failed", globalIndex + 1, "Exception: ${e.message}")
                 }
             }
@@ -4621,12 +4630,14 @@ class WireAutomationService : AccessibilityService() {
         // Final report
         val duration = System.currentTimeMillis() - sessionStartTime
         val durationSeconds = duration / 1000.0
-        reportFile.appendText("\n=== Summary ===\n")
-        reportFile.appendText("End Time: ${dateFormat.format(Date())}\n")
-        reportFile.appendText("Total Runtime: ${String.format("%.2f", durationSeconds)} seconds\n")
-        reportFile.appendText("Contacts Processed: $contactsProcessed\n")
-        reportFile.appendText("Messages Sent: $contactsSent\n")
-        reportFile.appendText("Success Rate: ${if (contactsProcessed > 0) String.format("%.1f", (contactsSent * 100.0 / contactsProcessed)) else "0.0"}%\n")
+        reportWriter.append("\n=== Summary ===\n")
+        reportWriter.append("End Time: ${dateFormat.format(Date())}\n")
+        reportWriter.append("Total Runtime: ${String.format("%.2f", durationSeconds)} seconds\n")
+        reportWriter.append("Contacts Processed: $contactsProcessed\n")
+        reportWriter.append("Messages Sent: $contactsSent\n")
+        reportWriter.append("Success Rate: ${if (contactsProcessed > 0) String.format("%.1f", (contactsSent * 100.0 / contactsProcessed)) else "0.0"}%\n")
+        reportWriter.flush()
+        reportWriter.close() // Close the writer
         
         android.util.Log.i("WireAuto", "=== Automation complete: $contactsSent/$contactsProcessed messages sent ===")
         debugLog("COMPLETE", "Automation complete: $contactsSent/$contactsProcessed messages sent")
@@ -4847,10 +4858,39 @@ class WireAutomationService : AccessibilityService() {
      * Phase 4: Return to main screen
      */
     private suspend fun returnToMainScreen() {
-        debugLog("NAVIGATION", "Returning to main screen...")
-        performGlobalAction(GLOBAL_ACTION_BACK)
-        delay(1000)
-        performGlobalAction(GLOBAL_ACTION_BACK) // Sometimes need to go back twice
+        debugLog("NAVIGATION", "Returning to main chat list screen...")
+        
+        // Press Back button until we're back on the main chat list
+        // This ensures we're ready for the next contact search
+        var backPresses = 0
+        val maxBackPresses = 5 // Safety limit
+        
+        while (backPresses < maxBackPresses) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            delay(1500) // Wait for navigation
+            
+            // Check if we're back on the main screen by verifying we can find the conversations list
+            val root = getRootWithRetry(maxRetries = 2, delayMs = 300)
+            if (root != null && root.packageName == WIRE_PACKAGE) {
+                // Try to find a RecyclerView or conversation list indicator
+                val recyclerView = findRecyclerView(root)
+                if (recyclerView != null) {
+                    debugLog("NAVIGATION", "Successfully returned to main chat list after ${backPresses + 1} back press(es)")
+                    android.util.Log.d("WireAuto", "Successfully returned to main chat list")
+                    break
+                }
+            }
+            
+            backPresses++
+            
+            // If we've pressed back multiple times, assume we're on main screen
+            if (backPresses >= 2) {
+                debugLog("NAVIGATION", "Assumed back on main screen after $backPresses back presses")
+                break
+            }
+        }
+        
+        // Final delay to ensure UI is stable
         delay(1000)
     }
     
