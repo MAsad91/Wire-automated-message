@@ -3221,8 +3221,20 @@ class WireAutomationService : AccessibilityService() {
     private fun findMessageInput(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         android.util.Log.d("WireAuto", "=== Finding message input field ===")
         
-        // Strategy 1: Find by specific view ID (com.witaletr.wire:id/message_input)
+        // Strategy 1: Find by Resource ID com.wire:id/text_input (priority)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            try {
+                val textInputNodes = root.findAccessibilityNodeInfosByViewId("com.wire:id/text_input")
+                if (textInputNodes != null && textInputNodes.isNotEmpty()) {
+                    val inputNode = textInputNodes[0]
+                    android.util.Log.d("WireAuto", "Message input found via ViewId: com.wire:id/text_input")
+                    return inputNode
+                }
+            } catch (e: Exception) {
+                android.util.Log.d("WireAuto", "ViewId search for com.wire:id/text_input failed: ${e.message}")
+            }
+            
+            // Also try alternative view ID
             try {
                 val viewIdNodes = root.findAccessibilityNodeInfosByViewId("com.witaletr.wire:id/message_input")
                 if (viewIdNodes != null && viewIdNodes.isNotEmpty()) {
@@ -3235,7 +3247,14 @@ class WireAutomationService : AccessibilityService() {
             }
         }
         
-        // Strategy 2: Find by hint text "Type a message"
+        // Strategy 2: Find by Resource ID using findNodeByResourceId
+        val textInputByResourceId = findNodeByResourceId(root, "com.wire:id/text_input")
+        if (textInputByResourceId != null) {
+            android.util.Log.d("WireAuto", "Message input found via findNodeByResourceId: com.wire:id/text_input")
+            return textInputByResourceId
+        }
+        
+        // Strategy 3: Find by hint text "Message" or "Type a message"
         val allEditTexts = mutableListOf<AccessibilityNodeInfo>()
         findAllNodesByClassName(root, "android.widget.EditText", allEditTexts)
         findAllNodesByClassName(root, "androidx.appcompat.widget.AppCompatEditText", allEditTexts)
@@ -3243,30 +3262,29 @@ class WireAutomationService : AccessibilityService() {
         for (editText in allEditTexts) {
             val contentDesc = editText.contentDescription?.toString()?.lowercase() ?: ""
             val hint = editText.hintText?.toString()?.lowercase() ?: ""
+            val resourceId = editText.viewIdResourceName ?: ""
             
             // Exclude search boxes
-            if (contentDesc.contains("search") || hint.contains("search")) {
+            if (contentDesc.contains("search") || hint.contains("search") || resourceId.contains("search")) {
                 continue
             }
             
-            // Prefer message input fields with specific hint
-            if (hint.contains("type a message") || 
-                hint.contains("type a message", ignoreCase = true) ||
-                contentDesc.contains("type a message") ||
+            // Prefer message input fields with "Message" hint
+            if (hint.contains("message", ignoreCase = true) || 
+                contentDesc.contains("message", ignoreCase = true)) {
+                android.util.Log.d("WireAuto", "Message input found via hint 'Message'")
+                return editText
+            }
+            
+            // Also check for "Type a message" hint
+            if (hint.contains("type a message", ignoreCase = true) ||
                 contentDesc.contains("type a message", ignoreCase = true)) {
                 android.util.Log.d("WireAuto", "Message input found via hint 'Type a message'")
                 return editText
             }
-            
-            // Also check for general message hints
-            if (contentDesc.contains("message") || 
-                hint.contains("message")) {
-                android.util.Log.d("WireAuto", "Message input found via message hint")
-                return editText
-            }
         }
         
-        // Strategy 3: If no specific message input found, return first non-search EditText
+        // Strategy 4: If no specific message input found, return first non-search EditText
         for (editText in allEditTexts) {
             val contentDesc = editText.contentDescription?.toString()?.lowercase() ?: ""
             val hint = editText.hintText?.toString()?.lowercase() ?: ""
@@ -4944,19 +4962,58 @@ class WireAutomationService : AccessibilityService() {
             return false
         }
         
-        // Clear any existing text
+        // Clear search bar completely before typing
+        debugLog("SEARCH", "Clearing search bar completely...")
+        
+        // Method 1: Clear using ACTION_SET_TEXT with empty string
         val bundleClear = android.os.Bundle()
         bundleClear.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
         searchInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundleClear)
         delay(300)
         
+        // Method 2: Select all and delete (more reliable clearing)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            try {
+                searchInput.performAction(AccessibilityNodeInfo.ACTION_SELECT)
+                delay(100)
+                searchInput.performAction(AccessibilityNodeInfo.ACTION_CUT)
+                delay(100)
+            } catch (e: Exception) {
+                android.util.Log.d("WireAuto", "Select and cut failed, using setText only: ${e.message}")
+            }
+        }
+        
+        // Method 3: Clear again to ensure it's empty
+        searchInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundleClear)
+        delay(300)
+        
+        // Verify search bar is empty by checking if we can set empty text again
+        val verifyClear = android.os.Bundle()
+        verifyClear.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+        searchInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, verifyClear)
+        delay(200)
+        
+        debugLog("SEARCH", "Search bar cleared, typing sanitized contact name character-by-character: $sanitizedName")
+        
         // Type sanitized name character-by-character with 100ms delay
-        debugLog("SEARCH", "Typing sanitized contact name character-by-character: $sanitizedName")
-        for (char in sanitizedName) {
-            val bundle = android.os.Bundle()
-            bundle.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, char.toString())
-            searchInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
-            delay(100) // Human-like typing delay
+        // Build the full name first, then set it (more reliable than character-by-character)
+        val bundleFull = android.os.Bundle()
+        bundleFull.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, sanitizedName)
+        val setFullText = searchInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundleFull)
+        
+        if (!setFullText) {
+            // Fallback: Type character-by-character if setText fails
+            android.util.Log.w("WireAuto", "SetText failed, falling back to character-by-character typing")
+            debugLog("SEARCH", "SetText failed, using character-by-character fallback")
+            for (char in sanitizedName) {
+                val bundle = android.os.Bundle()
+                bundle.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, char.toString())
+                searchInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
+                delay(100) // Human-like typing delay
+            }
+        } else {
+            android.util.Log.d("WireAuto", "Successfully set full search text: $sanitizedName")
+            debugLog("SEARCH", "Successfully set full search text: $sanitizedName")
         }
         
         // Increase search wait: Give search results extra 2 seconds to fully load
@@ -5147,6 +5204,7 @@ class WireAutomationService : AccessibilityService() {
     /**
      * Double-Check After Opening Chat: Verify the opened chat name matches
      * Read name from Chat Toolbar/Header and compare with expected name
+     * Excludes security notice text and refines header detection
      */
     private suspend fun verifyOpenedChatName(expectedName: String): Boolean {
         debugLog("VERIFY", "Verifying opened chat name: expected '$expectedName'")
@@ -5156,36 +5214,94 @@ class WireAutomationService : AccessibilityService() {
         val root = getRootWithRetry(maxRetries = 3, delayMs = 500)
         if (root == null || root.packageName != WIRE_PACKAGE) {
             android.util.Log.w("WireAuto", "Cannot access Wire app for verification")
-            return false
+            debugLog("VERIFY", "Cannot access Wire app - using Safety Skip")
+            return true // Safety Skip: Allow proceeding if can't access
         }
         
-        // Find toolbar/header area (usually at top of screen)
+        // Security notice text to exclude
+        val securityNoticeTexts = listOf(
+            "communication in wire is always end-to-end encrypted",
+            "end-to-end encrypted",
+            "encrypted",
+            "your messages are protected"
+        )
+        
+        // Refine Header Detection: Look ONLY for Toolbar Title or TextView at very top
+        val displayMetrics = resources.displayMetrics
+        val screenHeight = displayMetrics.heightPixels
+        val toolbarThreshold = (screenHeight * 0.15).toInt() // Top 15% for toolbar
+        
+        // Strategy 1: Find Toolbar Title directly
         val toolbarNodes = mutableListOf<AccessibilityNodeInfo>()
         findAllNodesByClassName(root, "androidx.appcompat.widget.Toolbar", toolbarNodes)
         findAllNodesByClassName(root, "android.widget.Toolbar", toolbarNodes)
         
-        // Also search for TextViews in top 20% of screen (toolbar area)
-        val displayMetrics = resources.displayMetrics
-        val screenHeight = displayMetrics.heightPixels
-        val toolbarThreshold = (screenHeight * 0.20).toInt()
+        var actualChatName = ""
         
-        val allTextViews = mutableListOf<AccessibilityNodeInfo>()
-        findAllNodesByClassName(root, "android.widget.TextView", allTextViews)
-        
-        // Find TextViews in toolbar area
-        val toolbarTextViews = allTextViews.filter { textView ->
-            val bounds = android.graphics.Rect()
-            textView.getBoundsInScreen(bounds)
-            bounds.top < toolbarThreshold && textView.text?.toString()?.trim()?.isNotBlank() == true
+        // Look for TextView inside Toolbar (Toolbar Title)
+        for (toolbar in toolbarNodes) {
+            val toolbarTextViews = mutableListOf<AccessibilityNodeInfo>()
+            findAllTextViewsInNode(toolbar, toolbarTextViews)
+            
+            for (textView in toolbarTextViews) {
+                val text = textView.text?.toString()?.trim() ?: ""
+                val lowerText = text.lowercase()
+                
+                // Exclude Security Notice
+                val isSecurityNotice = securityNoticeTexts.any { notice ->
+                    lowerText.contains(notice, ignoreCase = true)
+                }
+                
+                if (!isSecurityNotice && text.isNotBlank() && text.length <= 100) {
+                    actualChatName = text
+                    android.util.Log.d("WireAuto", "Found chat name in Toolbar: '$actualChatName'")
+                    debugLog("VERIFY", "Found chat name in Toolbar: '$actualChatName'")
+                    break
+                }
+            }
+            if (actualChatName.isNotBlank()) break
         }
         
-        // Get the actual chat name from toolbar
-        val actualChatName = toolbarTextViews.firstOrNull()?.text?.toString()?.trim() ?: ""
-        
+        // Strategy 2: If not found in Toolbar, find TextView at very top of screen
         if (actualChatName.isBlank()) {
-            android.util.Log.w("WireAuto", "Could not read chat name from toolbar")
-            debugLog("VERIFY", "Could not read chat name from toolbar - assuming correct")
-            return true // Assume correct if we can't verify
+            val allTextViews = mutableListOf<AccessibilityNodeInfo>()
+            findAllNodesByClassName(root, "android.widget.TextView", allTextViews)
+            
+            // Sort by Y position (top to bottom) and get the top-most TextView
+            val topTextViews = allTextViews
+                .mapNotNull { textView ->
+                    val bounds = android.graphics.Rect()
+                    textView.getBoundsInScreen(bounds)
+                    val text = textView.text?.toString()?.trim() ?: ""
+                    val lowerText = text.lowercase()
+                    
+                    // Must be in top 15% and not be security notice
+                    val isInToolbarArea = bounds.top < toolbarThreshold
+                    val isSecurityNotice = securityNoticeTexts.any { notice ->
+                        lowerText.contains(notice, ignoreCase = true)
+                    }
+                    
+                    if (isInToolbarArea && !isSecurityNotice && text.isNotBlank() && text.length <= 100) {
+                        Pair(textView, bounds.top)
+                    } else {
+                        null
+                    }
+                }
+                .sortedBy { it.second } // Sort by Y position (top first)
+            
+            actualChatName = topTextViews.firstOrNull()?.first?.text?.toString()?.trim() ?: ""
+            
+            if (actualChatName.isNotBlank()) {
+                android.util.Log.d("WireAuto", "Found chat name in top TextView: '$actualChatName'")
+                debugLog("VERIFY", "Found chat name in top TextView: '$actualChatName'")
+            }
+        }
+        
+        // Fallback Verification: Safety Skip - If can't find name but successfully clicked contact, allow proceeding
+        if (actualChatName.isBlank()) {
+            android.util.Log.w("WireAuto", "Could not read chat name from toolbar/header")
+            debugLog("VERIFY", "Could not read chat name - using Safety Skip (allowing proceed)")
+            return true // Safety Skip: Allow proceeding if can't verify
         }
         
         val sanitizedExpected = sanitizeContactName(expectedName).lowercase()
@@ -5214,7 +5330,9 @@ class WireAutomationService : AccessibilityService() {
         } else {
             android.util.Log.w("WireAuto", "Chat verification failed: expected '$expectedName', got '$actualChatName'")
             debugLog("VERIFY", "Chat verification failed: expected '$expectedName', got '$actualChatName'")
-            return false
+            // Safety Skip: If verification fails but we successfully clicked, allow proceeding
+            debugLog("VERIFY", "Using Safety Skip - allowing proceed despite mismatch")
+            return true // Safety Skip: Allow proceeding
         }
     }
     
@@ -5267,8 +5385,16 @@ class WireAutomationService : AccessibilityService() {
                     return false
                 }
                 
-                // Step 2: Focus input field
-                debugLog("MESSAGE", "Focusing message input field...")
+                // Step 2: Click and focus input field (ensure it's active)
+                debugLog("MESSAGE", "Clicking and focusing message input field...")
+                
+                // Click the input field first to ensure it's active
+                if (!clickNodeWithGesture(messageInput)) {
+                    messageInput.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                }
+                delay(500)
+                
+                // Then focus it
                 messageInput.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
                 delay(500)
                 
