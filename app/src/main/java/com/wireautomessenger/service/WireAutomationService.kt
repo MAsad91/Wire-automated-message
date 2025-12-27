@@ -683,7 +683,7 @@ class WireAutomationService : AccessibilityService() {
      */
     private fun resetState() {
         android.util.Log.i("WireAuto", "Resetting state flags and clearing session data")
-        isRunning.set(false)
+            isRunning.set(false)
         isWireOpened.set(false)
         isSendingInProgress.set(false)
         
@@ -3257,15 +3257,30 @@ class WireAutomationService : AccessibilityService() {
 
     private fun findMessageInput(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         android.util.Log.d("WireAuto", "=== Finding message input field ===")
+        debugLog("INPUT", "Finding message input field - avoiding CONVERSATIONS TextView and top 15% of screen")
         
-        // Strategy 1: Find by Resource ID com.wire:id/text_input (priority)
+        // Get screen dimensions to avoid top 15%
+        val screenHeight = resources.displayMetrics.heightPixels
+        val top15PercentThreshold = (screenHeight * 0.15).toInt()
+        
+        // Strategy 1: Find by Resource ID com.wire:id/text_input (HIGHEST PRIORITY)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
             try {
                 val textInputNodes = root.findAccessibilityNodeInfosByViewId("com.wire:id/text_input")
                 if (textInputNodes != null && textInputNodes.isNotEmpty()) {
                     val inputNode = textInputNodes[0]
+                    // Verify it's not in top 15% and not a CONVERSATIONS TextView
+                    val bounds = android.graphics.Rect()
+                    inputNode.getBoundsInScreen(bounds)
+                    val nodeText = inputNode.text?.toString() ?: ""
+                    
+                    if (bounds.top > top15PercentThreshold && !nodeText.contains("CONVERSATIONS", ignoreCase = true)) {
                     android.util.Log.d("WireAuto", "Message input found via ViewId: com.wire:id/text_input")
+                        debugLog("INPUT", "Found com.wire:id/text_input at y=${bounds.top} (threshold=$top15PercentThreshold)")
                     return inputNode
+                    } else {
+                        android.util.Log.w("WireAuto", "Found text_input but it's in top 15% or is CONVERSATIONS - skipping")
+                    }
                 }
             } catch (e: Exception) {
                 android.util.Log.d("WireAuto", "ViewId search for com.wire:id/text_input failed: ${e.message}")
@@ -3276,8 +3291,14 @@ class WireAutomationService : AccessibilityService() {
                 val viewIdNodes = root.findAccessibilityNodeInfosByViewId("com.witaletr.wire:id/message_input")
                 if (viewIdNodes != null && viewIdNodes.isNotEmpty()) {
                     val inputNode = viewIdNodes[0]
+                    val bounds = android.graphics.Rect()
+                    inputNode.getBoundsInScreen(bounds)
+                    val nodeText = inputNode.text?.toString() ?: ""
+                    
+                    if (bounds.top > top15PercentThreshold && !nodeText.contains("CONVERSATIONS", ignoreCase = true)) {
                     android.util.Log.d("WireAuto", "Message input found via ViewId: com.witaletr.wire:id/message_input")
                     return inputNode
+                    }
                 }
             } catch (e: Exception) {
                 android.util.Log.d("WireAuto", "ViewId search failed: ${e.message}")
@@ -3287,11 +3308,17 @@ class WireAutomationService : AccessibilityService() {
         // Strategy 2: Find by Resource ID using findNodeByResourceId
         val textInputByResourceId = findNodeByResourceId(root, "com.wire:id/text_input")
         if (textInputByResourceId != null) {
+            val bounds = android.graphics.Rect()
+            textInputByResourceId.getBoundsInScreen(bounds)
+            val nodeText = textInputByResourceId.text?.toString() ?: ""
+            
+            if (bounds.top > top15PercentThreshold && !nodeText.contains("CONVERSATIONS", ignoreCase = true)) {
             android.util.Log.d("WireAuto", "Message input found via findNodeByResourceId: com.wire:id/text_input")
             return textInputByResourceId
+            }
         }
         
-        // Strategy 3: Find by hint text "Message" or "Type a message"
+        // Strategy 3: Find by hint text "Message" or "Type a message" (avoiding top 15% and CONVERSATIONS)
         val allEditTexts = mutableListOf<AccessibilityNodeInfo>()
         findAllNodesByClassName(root, "android.widget.EditText", allEditTexts)
         findAllNodesByClassName(root, "androidx.appcompat.widget.AppCompatEditText", allEditTexts)
@@ -3300,38 +3327,64 @@ class WireAutomationService : AccessibilityService() {
             val contentDesc = editText.contentDescription?.toString()?.lowercase() ?: ""
             val hint = editText.hintText?.toString()?.lowercase() ?: ""
             val resourceId = editText.viewIdResourceName ?: ""
+            val nodeText = editText.text?.toString() ?: ""
             
-            // Exclude search boxes
+            // CRITICAL: Exclude search boxes
             if (contentDesc.contains("search") || hint.contains("search") || resourceId.contains("search")) {
+                continue
+            }
+            
+            // CRITICAL: Exclude CONVERSATIONS TextView
+            if (nodeText.contains("CONVERSATIONS", ignoreCase = true)) {
+                android.util.Log.w("WireAuto", "Skipping EditText with CONVERSATIONS text: $nodeText")
+                continue
+            }
+            
+            // Check if in top 15% of screen
+            val bounds = android.graphics.Rect()
+            editText.getBoundsInScreen(bounds)
+            if (bounds.top <= top15PercentThreshold) {
+                android.util.Log.w("WireAuto", "Skipping EditText in top 15% of screen (y=${bounds.top}, threshold=$top15PercentThreshold)")
                 continue
             }
             
             // Prefer message input fields with "Message" hint
             if (hint.contains("message", ignoreCase = true) || 
                 contentDesc.contains("message", ignoreCase = true)) {
-                android.util.Log.d("WireAuto", "Message input found via hint 'Message'")
+                android.util.Log.d("WireAuto", "Message input found via hint 'Message' at y=${bounds.top}")
+                debugLog("INPUT", "Found input with 'Message' hint at y=${bounds.top}")
                 return editText
             }
             
             // Also check for "Type a message" hint
             if (hint.contains("type a message", ignoreCase = true) ||
                 contentDesc.contains("type a message", ignoreCase = true)) {
-                android.util.Log.d("WireAuto", "Message input found via hint 'Type a message'")
+                android.util.Log.d("WireAuto", "Message input found via hint 'Type a message' at y=${bounds.top}")
+                debugLog("INPUT", "Found input with 'Type a message' hint at y=${bounds.top}")
                 return editText
             }
         }
         
-        // Strategy 4: If no specific message input found, return first non-search EditText
+        // Strategy 4: If no specific message input found, return first non-search EditText (but still avoid top 15% and CONVERSATIONS)
         for (editText in allEditTexts) {
             val contentDesc = editText.contentDescription?.toString()?.lowercase() ?: ""
             val hint = editText.hintText?.toString()?.lowercase() ?: ""
-            if (!contentDesc.contains("search") && !hint.contains("search")) {
-                android.util.Log.d("WireAuto", "Message input found via fallback (first non-search EditText)")
+            val nodeText = editText.text?.toString() ?: ""
+            val bounds = android.graphics.Rect()
+            editText.getBoundsInScreen(bounds)
+            
+            if (!contentDesc.contains("search") && 
+                !hint.contains("search") &&
+                !nodeText.contains("CONVERSATIONS", ignoreCase = true) &&
+                bounds.top > top15PercentThreshold) {
+                android.util.Log.d("WireAuto", "Message input found via fallback (first non-search EditText) at y=${bounds.top}")
+                debugLog("INPUT", "Found fallback input at y=${bounds.top}")
                 return editText
             }
         }
         
         android.util.Log.w("WireAuto", "Message input not found")
+        debugLog("ERROR", "Message input not found - checked all strategies")
         return null
     }
     
@@ -3354,19 +3407,63 @@ class WireAutomationService : AccessibilityService() {
      */
     private fun findSendButton(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         android.util.Log.d("WireAuto", "=== Finding send button using multiple strategies ===")
+        debugLog("SEND", "Finding send button - checking com.wire:id/send_button and com.wire:id/video_call_button")
         
-        // Strategy 1: Find by specific view ID (com.witaletr.wire:id/send_button) - HIGHEST PRIORITY
+        // Strategy 1: Find by Resource ID com.wire:id/send_button (HIGHEST PRIORITY)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            try {
+                val sendButtonNodes = root.findAccessibilityNodeInfosByViewId("com.wire:id/send_button")
+                if (sendButtonNodes != null && sendButtonNodes.isNotEmpty()) {
+                    val sendNode = sendButtonNodes[0]
+                    android.util.Log.d("WireAuto", "Send button found via ViewId: com.wire:id/send_button")
+                    debugLog("SEND", "Found com.wire:id/send_button")
+                    return getClickableParent(sendNode)
+                }
+            } catch (e: Exception) {
+                android.util.Log.d("WireAuto", "ViewId search for com.wire:id/send_button failed: ${e.message}")
+            }
+            
+            // Strategy 1b: Find by Resource ID com.wire:id/video_call_button (which often changes to send)
+            try {
+                val videoCallNodes = root.findAccessibilityNodeInfosByViewId("com.wire:id/video_call_button")
+                if (videoCallNodes != null && videoCallNodes.isNotEmpty()) {
+                    val sendNode = videoCallNodes[0]
+                    android.util.Log.d("WireAuto", "Send button found via ViewId: com.wire:id/video_call_button")
+                    debugLog("SEND", "Found com.wire:id/video_call_button (may act as send button)")
+                    return getClickableParent(sendNode)
+                }
+            } catch (e: Exception) {
+                android.util.Log.d("WireAuto", "ViewId search for com.wire:id/video_call_button failed: ${e.message}")
+            }
+            
+            // Strategy 1c: Also try alternative view ID (com.witaletr.wire:id/send_button)
             try {
                 val viewIdNodes = root.findAccessibilityNodeInfosByViewId("com.witaletr.wire:id/send_button")
                 if (viewIdNodes != null && viewIdNodes.isNotEmpty()) {
                     val sendNode = viewIdNodes[0]
                     android.util.Log.d("WireAuto", "Send button found via ViewId: com.witaletr.wire:id/send_button")
+                    debugLog("SEND", "Found com.witaletr.wire:id/send_button")
                     return getClickableParent(sendNode)
                 }
             } catch (e: Exception) {
                 android.util.Log.d("WireAuto", "ViewId search for send_button failed: ${e.message}")
             }
+        }
+        
+        // Strategy 1d: Try findNodeByResourceId for com.wire:id/send_button
+        val sendButtonByResourceId = findNodeByResourceId(root, "com.wire:id/send_button")
+        if (sendButtonByResourceId != null) {
+            android.util.Log.d("WireAuto", "Send button found via findNodeByResourceId: com.wire:id/send_button")
+            debugLog("SEND", "Found com.wire:id/send_button via findNodeByResourceId")
+            return getClickableParent(sendButtonByResourceId)
+        }
+        
+        // Strategy 1e: Try findNodeByResourceId for com.wire:id/video_call_button
+        val videoCallByResourceId = findNodeByResourceId(root, "com.wire:id/video_call_button")
+        if (videoCallByResourceId != null) {
+            android.util.Log.d("WireAuto", "Send button found via findNodeByResourceId: com.wire:id/video_call_button")
+            debugLog("SEND", "Found com.wire:id/video_call_button via findNodeByResourceId")
+            return getClickableParent(videoCallByResourceId)
         }
         
         // Strategy 2: Find by content description "Send" - SECOND PRIORITY
@@ -3426,11 +3523,53 @@ class WireAutomationService : AccessibilityService() {
                 text.contains("send") || 
                 viewId.contains("send")) {
                 android.util.Log.d("WireAuto", "Send button found via Button search: className=${button.className}")
+                debugLog("SEND", "Found send button via Button search")
                 return getClickableParent(button)
             }
         }
         
-        android.util.Log.w("WireAuto", "Send button not found using standard strategies")
+        // Strategy 5: Find clickable image/icon on the right side of input field (fallback)
+        // This is a last resort when no send button ID is found
+        android.util.Log.d("WireAuto", "No send button found by ID, trying to find clickable icon on right side of input")
+        debugLog("SEND", "Trying fallback: find clickable image/icon on right side of input field")
+        
+        // Find message input to determine its position
+        val messageInput = findMessageInput(root)
+        if (messageInput != null) {
+            val inputBounds = android.graphics.Rect()
+            messageInput.getBoundsInScreen(inputBounds)
+            val inputRight = inputBounds.right
+            val inputTop = inputBounds.top
+            val inputBottom = inputBounds.bottom
+            val inputCenterY = (inputTop + inputBottom) / 2
+            
+            // Look for clickable ImageView/ImageButton on the right side of input
+            val allImages = mutableListOf<AccessibilityNodeInfo>()
+            findAllNodesByClassName(root, "android.widget.ImageView", allImages)
+            findAllNodesByClassName(root, "android.widget.ImageButton", allImages)
+            
+            for (image in allImages) {
+                if (!image.isClickable) continue
+                
+                val imageBounds = android.graphics.Rect()
+                image.getBoundsInScreen(imageBounds)
+                
+                // Check if image is on the right side of input and vertically aligned
+                val imageLeft = imageBounds.left
+                val imageCenterY = (imageBounds.top + imageBounds.bottom) / 2
+                
+                // Image should be to the right of input and roughly vertically aligned
+                if (imageLeft > inputRight && 
+                    Math.abs(imageCenterY - inputCenterY) < 100) { // Within 100px vertically
+                    android.util.Log.d("WireAuto", "Found clickable icon on right side of input: className=${image.className}")
+                    debugLog("SEND", "Found clickable icon on right side of input at x=$imageLeft")
+                    return getClickableParent(image)
+                }
+            }
+        }
+        
+        android.util.Log.w("WireAuto", "Send button not found using all strategies")
+        debugLog("ERROR", "Send button not found - all strategies exhausted")
         return null
     }
     
@@ -3503,6 +3642,28 @@ class WireAutomationService : AccessibilityService() {
                 findAllButtons(child, results)
             }
         }
+    }
+    
+    /**
+     * Check if a specific text exists in the view tree
+     */
+    private fun hasTextInView(root: AccessibilityNodeInfo, searchText: String): Boolean {
+        val nodeText = root.text?.toString() ?: ""
+        val contentDesc = root.contentDescription?.toString() ?: ""
+        
+        if (nodeText.contains(searchText, ignoreCase = true) || 
+            contentDesc.contains(searchText, ignoreCase = true)) {
+            return true
+        }
+        
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i)
+            if (child != null && hasTextInView(child, searchText)) {
+                return true
+            }
+        }
+        
+        return false
     }
     
     private fun findSendButtonNearInput(root: AccessibilityNodeInfo, inputField: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -5110,6 +5271,37 @@ class WireAutomationService : AccessibilityService() {
         }
         delay(2000) // Wait for conversation to open
         
+        // Fix 'Conversations' Header Confusion: Check if still on search screen
+        root = getRootWithRetry(maxRetries = 3, delayMs = 500)
+        val stillOnSearchScreen = root?.let { 
+            val searchBarAfterClick = findSearchBar(it)
+            val searchInputAfterClick = findSearchInput(it)
+            val hasConversationsText = hasTextInView(it, "CONVERSATIONS")
+            
+            // If search bar is still visible or we see CONVERSATIONS text, we're still on search/home screen
+            searchBarAfterClick != null || searchInputAfterClick != null || hasConversationsText
+        } ?: false
+        
+        if (stillOnSearchScreen) {
+            android.util.Log.w("WireAuto", "Still on search screen after clicking result - clicking again")
+            debugLog("SEARCH", "Still on search screen - clicking search result again")
+            
+            // Find search result again and click
+            root = getRootWithRetry(maxRetries = 3, delayMs = 500)
+            val searchResultRetry = root?.let { findFlexibleSearchResult(it, sanitizedName) }
+            
+            if (searchResultRetry != null) {
+                debugLog("SEARCH", "Clicking search result again (retry)")
+                if (!clickNodeWithGesture(searchResultRetry)) {
+                    searchResultRetry.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                }
+                delay(2000) // Wait for conversation to open again
+            } else {
+                android.util.Log.w("WireAuto", "Could not find search result for retry")
+                debugLog("ERROR", "Could not find search result for retry click")
+            }
+        }
+        
         // Double-Check After Opening Chat (The "Pro" Layer)
         // Read name from Chat Toolbar/Header and verify it matches
         val verified = verifyOpenedChatName(sanitizedName)
@@ -5455,30 +5647,82 @@ class WireAutomationService : AccessibilityService() {
                     return false
                 }
                 
-                // Step 2: Click and focus input field (ensure it's active)
+                // Step 2: Wait 2 seconds after search result click, then force click bottom-center
+                debugLog("MESSAGE", "Waiting 2 seconds after search result click...")
+                delay(2000) // Wait 2 seconds as requested
+                
+                // Force click on bottom-center of screen where input box is usually located
+                debugLog("MESSAGE", "Performing force click on bottom-center of screen...")
+                val screenWidth = resources.displayMetrics.widthPixels
+                val screenHeight = resources.displayMetrics.heightPixels
+                val bottomCenterX = screenWidth / 2
+                val bottomCenterY = (screenHeight * 0.85).toInt() // 85% down the screen (near bottom)
+                
+                android.util.Log.d("WireAuto", "Force clicking at bottom-center: ($bottomCenterX, $bottomCenterY)")
+                debugLog("MESSAGE", "Force clicking at bottom-center: ($bottomCenterX, $bottomCenterY)")
+                
+                try {
+                    val stroke = android.accessibilityservice.GestureDescription.StrokeDescription(
+                        android.graphics.Path().apply {
+                            moveTo(bottomCenterX.toFloat(), bottomCenterY.toFloat())
+                        },
+                        0, 100
+                    )
+                    val gesture = android.accessibilityservice.GestureDescription.Builder()
+                        .addStroke(stroke)
+                        .build()
+                    
+                    var gestureCompleted = false
+                    dispatchGesture(gesture, object : android.accessibilityservice.AccessibilityService.GestureResultCallback() {
+                        override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                            gestureCompleted = true
+                        }
+                        override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                            android.util.Log.w("WireAuto", "Force click gesture cancelled")
+                        }
+                    }, null)
+                    
+                    // Wait for gesture to complete
+                    var waitAttempts = 0
+                    while (!gestureCompleted && waitAttempts < 20) {
+                        delay(100)
+                        waitAttempts++
+                    }
+                    delay(500) // Additional delay after force click
+                } catch (e: Exception) {
+                    android.util.Log.w("WireAuto", "Force click failed: ${e.message}")
+                    debugLog("WARN", "Force click failed, continuing with normal click: ${e.message}")
+                }
+                
+                // Step 3: Click and focus input field (ensure it's active)
                 debugLog("MESSAGE", "Clicking and focusing message input field...")
                 
+                // Refresh root and find input again after force click
+                root = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                val refreshedInput = root?.let { findMessageInput(it) } ?: messageInput
+                
                 // Click the input field first to ensure it's active
-                if (!clickNodeWithGesture(messageInput)) {
-                    messageInput.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                if (!clickNodeWithGesture(refreshedInput)) {
+                    refreshedInput.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 }
                 delay(500)
                 
                 // Then focus it
-                messageInput.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                refreshedInput.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
                 delay(500)
                 
-                // Step 3: Clear existing text
+                // Step 4: Clear existing text
                 val bundleClear = android.os.Bundle()
                 bundleClear.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
-                messageInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundleClear)
+                refreshedInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundleClear)
                 delay(300)
                 
-                // Step 4: Type message (use setText for speed, but could be changed to character-by-character)
-                debugLog("MESSAGE", "Setting message text...")
+                // Step 5: Type message (use setText for speed, but could be changed to character-by-character)
+                debugLog("MESSAGE", "Setting message text in input field...")
+                android.util.Log.i("WireAuto", "Typing message: $message")
                 val bundle = android.os.Bundle()
                 bundle.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, message)
-                val textSet = messageInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
+                val textSet = refreshedInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
                 
                 if (!textSet) {
                     android.util.Log.w("WireAuto", "Failed to set message text (attempt $attempt)")
@@ -5491,11 +5735,11 @@ class WireAutomationService : AccessibilityService() {
                 
                 delay(1000) // Wait for send button to enable
                 
-                // Step 5: Find and click send button
+                // Step 6: Find and click send button
                 root = getRootWithRetry(maxRetries = 3, delayMs = 500)
-                val sendButton = if (root != null && messageInput != null) {
+                val sendButton = if (root != null && refreshedInput != null) {
                     val rootNonNull = root
-                    val inputNonNull = messageInput
+                    val inputNonNull = refreshedInput
                     findSendButton(rootNonNull) ?: findSendButtonNearInput(rootNonNull, inputNonNull)
                 } else {
                     null
@@ -5562,7 +5806,7 @@ class WireAutomationService : AccessibilityService() {
      * Phase 4: Return to main screen
      */
     private suspend fun returnToMainScreen() {
-        debugLog("NAVIGATION", "Returning to main chat list screen...")
+        debugLog("NAVIGATION", "Returning to main chat list screen and clearing search bar...")
         
         // Press Back button until we're back on the main chat list
         // This ensures we're ready for the next contact search
@@ -5570,7 +5814,7 @@ class WireAutomationService : AccessibilityService() {
         val maxBackPresses = 5 // Safety limit
         
         while (backPresses < maxBackPresses) {
-        performGlobalAction(GLOBAL_ACTION_BACK)
+            performGlobalAction(GLOBAL_ACTION_BACK)
             delay(1500) // Wait for navigation
             
             // Check if we're back on the main screen by verifying we can find the conversations list
@@ -5591,6 +5835,28 @@ class WireAutomationService : AccessibilityService() {
             if (backPresses >= 2) {
                 debugLog("NAVIGATION", "Assumed back on main screen after $backPresses back presses")
                 break
+            }
+        }
+        
+        // Clear search bar completely before next contact
+        debugLog("NAVIGATION", "Clearing search bar to ensure clean state for next contact")
+        val root = getRootWithRetry(maxRetries = 3, delayMs = 500)
+        if (root != null && root.packageName == WIRE_PACKAGE) {
+            val searchInput = findSearchInput(root)
+            if (searchInput != null) {
+                // Clear search bar completely
+                val bundleClear = android.os.Bundle()
+                bundleClear.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+                searchInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundleClear)
+                delay(300)
+                
+                // Verify it's cleared
+                searchInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundleClear)
+                delay(200)
+                debugLog("NAVIGATION", "Search bar cleared successfully")
+                android.util.Log.d("WireAuto", "Search bar cleared - ready for next contact")
+            } else {
+                debugLog("NAVIGATION", "No search input found - may already be on home screen")
             }
         }
         
