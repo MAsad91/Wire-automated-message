@@ -5771,10 +5771,10 @@ class WireAutomationService : AccessibilityService() {
                 
                 delay(2000) // Wait for message to send
                 
-                // Step 6: Verify message was sent (check if input is empty)
+                // Step 7: Verify message was sent (check if input is empty)
                 root = getRootWithRetry(maxRetries = 3, delayMs = 500)
-                val refreshedInput = root?.let { findMessageInput(it) }
-                val inputText = refreshedInput?.text?.toString()?.trim() ?: ""
+                val verificationInput = root?.let { findMessageInput(it) }
+                val inputText = verificationInput?.text?.toString()?.trim() ?: ""
                 
                 if (inputText.isEmpty()) {
                     debugLog("SUCCESS", "Message sent confirmed - input field is empty")
