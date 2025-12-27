@@ -4278,9 +4278,16 @@ class WireAutomationService : AccessibilityService() {
             debugLog("PHASE0", "Scroll ${scrollIndex}/$scrollCount: Currently found ${discoveredContacts.size} unique contacts")
             updateNotification("Scanning contacts... (${discoveredContacts.size} found, scroll $scrollIndex/$scrollCount)")
             
+            // Check if root is null before scrolling
+            if (root == null || root.packageName != WIRE_PACKAGE) {
+                android.util.Log.w("WireAuto", "Root is null or not Wire package at scroll $scrollIndex")
+                debugLog("PHASE0", "Root is null or not Wire package at scroll $scrollIndex")
+                break
+            }
+            
             // Perform slow scroll down
             debugLog("PHASE0", "Performing slow scroll down...")
-            val scrolled = performSlowScroll(root)
+            val scrolled = performSlowScroll(root!!)
             if (!scrolled) {
                 android.util.Log.w("WireAuto", "Could not scroll further at scroll $scrollIndex")
                 debugLog("PHASE0", "Could not scroll further at scroll $scrollIndex")
@@ -4299,7 +4306,7 @@ class WireAutomationService : AccessibilityService() {
             }
             
             // Extract contacts from current view after scroll
-            val contactsAfterScroll = extractContactNamesFromView(root)
+            val contactsAfterScroll = extractContactNamesFromView(root!!)
             val beforeCount = discoveredContacts.size
             discoveredContacts.addAll(contactsAfterScroll)
             val newContacts = discoveredContacts.size - beforeCount
