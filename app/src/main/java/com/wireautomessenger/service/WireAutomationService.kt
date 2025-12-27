@@ -454,7 +454,21 @@ class WireAutomationService : AccessibilityService() {
             android.util.Log.i("WireAuto", "Starting message sending process - State: isSendingInProgress=true")
             
             debugLog("ACTION", "STEP 3: Starting automation flow with contact discovery")
-            // Phase 0: Contact Discovery - Discover contacts from home screen first
+            
+            // ============================================================
+            // PHASE 0: SCAN-THEN-SEND FLOW
+            // ============================================================
+            // Step 1: Pehle sab contacts ko scan karo aur complete list banao
+            // Step 2: Phir us list ke according har contact ki conversation open karo
+            // Step 3: Phir har contact ko message bhejo
+            // ============================================================
+            
+            // Phase 0: Contact Discovery - Pehle sab contacts ko scan karo aur list banao
+            android.util.Log.i("WireAuto", "=== STEP 1: Scanning contacts and building list ===")
+            debugLog("PHASE0", "=== STEP 1: Scanning contacts from home screen to build complete list ===")
+            updateNotification("Scanning contacts and building list...")
+            sendProgressBroadcast("Scanning contacts and building list...")
+            
             val discoveredContacts = discoverContactsFromHomeScreen()
             
             // Force Discovery Success: If empty, STOP automation and log error
@@ -478,14 +492,22 @@ class WireAutomationService : AccessibilityService() {
             Handler(Looper.getMainLooper()).post {
                 Toast.makeText(this, "✓ Discovered ${discoveredContacts.size} contacts", Toast.LENGTH_LONG).show()
             }
-            android.util.Log.i("WireAuto", "✓ Discovered ${discoveredContacts.size} contacts - showing toast")
-            debugLog("SUCCESS", "Discovered ${discoveredContacts.size} contacts - showing toast")
+            android.util.Log.i("WireAuto", "✓ Discovered ${discoveredContacts.size} contacts - List ready for sending")
+            debugLog("SUCCESS", "Contact list built successfully: ${discoveredContacts.size} contacts discovered")
             
             // Human mimicry: Delay before starting search process
             debugLog("PHASE0", "Contact discovery complete. Human mimicry delay: 2-3 seconds")
             val humanDelay = (2000..3000).random()
             delay(humanDelay.toLong())
             
+            // ============================================================
+            // PHASE 1: SEND MESSAGES TO EACH CONTACT IN LIST
+            // ============================================================
+            // Ab discovered contacts list ke according har contact ki
+            // conversation open karke message bhejo
+            // ============================================================
+            android.util.Log.i("WireAuto", "=== STEP 2: Starting to send messages to ${discoveredContacts.size} contacts from list ===")
+            debugLog("ACTION", "=== STEP 2: Iterating through contact list and sending messages ===")
             debugLog("ACTION", "Calling sendMessagesViaSearch with ${discoveredContacts.size} discovered contacts")
             sendMessagesViaSearch(message, discoveredContacts)
 
@@ -4754,10 +4776,16 @@ class WireAutomationService : AccessibilityService() {
     /**
      * NEW SEARCH-BASED IMPLEMENTATION
      * Phase 1-6: Complete automation with search, human mimicry, batching, and anti-ban strategies
+     * 
+     * FLOW: 
+     * 1. Pehle contacts scan kiye gaye aur list banai gayi (discoverContactsFromHomeScreen)
+     * 2. Ab us list ke according har contact ki conversation open karke message bhejo
+     * 3. Har contact ke liye: Search -> Open conversation -> Send message -> Next contact
      */
     private suspend fun sendMessagesViaSearch(message: String, contactNames: List<String>) {
-        android.util.Log.i("WireAuto", "=== PHASE 1: Starting search-based message sending ===")
-        debugLog("EVENT", "=== PHASE 1: Starting search-based message sending ===")
+        android.util.Log.i("WireAuto", "=== PHASE 1: Starting to send messages to pre-scanned contact list ===")
+        debugLog("EVENT", "=== PHASE 1: Iterating through contact list and sending messages ===")
+        debugLog("EVENT", "Contact list received: ${contactNames.size} contacts to process")
         
         // Phase 1: Setup & Launch - Already done in sendMessagesToAllContacts
         // Bootstrap delay: Wait for app to sync messages
@@ -4773,8 +4801,9 @@ class WireAutomationService : AccessibilityService() {
             return
         }
         
-        android.util.Log.i("WireAuto", "Found ${contactNames.size} contacts to send messages to")
-        debugLog("DATA", "Contact list: ${contactNames.size} contacts")
+        android.util.Log.i("WireAuto", "Processing ${contactNames.size} contacts from pre-scanned list")
+        debugLog("DATA", "Contact list ready: ${contactNames.size} contacts")
+        debugLog("DATA", "Will now iterate through list: Open each conversation -> Send message -> Next")
         
         // Phase 4: Batching configuration
         val batchSize = 20
@@ -4792,15 +4821,17 @@ class WireAutomationService : AccessibilityService() {
         reportWriter.append("Message: ${message.take(100)}${if (message.length > 100) "..." else ""}\n\n")
         reportWriter.flush()
         
-        // Process contacts in batches
+        // Process contacts in batches - Iterating through pre-scanned contact list
+        // Har contact ke liye: Search karo -> Conversation open karo -> Message bhejo -> Next contact
         for (batchStart in contactNames.indices step batchSize) {
             val batchEnd = minOf(batchStart + batchSize, contactNames.size)
             val batch = contactNames.subList(batchStart, batchEnd)
             
-            android.util.Log.i("WireAuto", "=== Processing batch ${(batchStart / batchSize) + 1}: contacts ${batchStart + 1}-$batchEnd ===")
-            debugLog("BATCH", "Processing batch ${(batchStart / batchSize) + 1}: contacts ${batchStart + 1}-$batchEnd")
+            android.util.Log.i("WireAuto", "=== Processing batch ${(batchStart / batchSize) + 1}: contacts ${batchStart + 1}-$batchEnd from pre-scanned list ===")
+            debugLog("BATCH", "Processing batch ${(batchStart / batchSize) + 1}: contacts ${batchStart + 1}-$batchEnd from pre-scanned list")
             updateNotification("Processing batch ${(batchStart / batchSize) + 1}/${(contactNames.size + batchSize - 1) / batchSize}...")
             
+            // Iterate through each contact in the pre-scanned list
             for ((index, contactName) in batch.withIndex()) {
                 val globalIndex = batchStart + index
                 
@@ -4823,12 +4854,21 @@ class WireAutomationService : AccessibilityService() {
                 contactsProcessed++
                 
                 try {
-                    android.util.Log.i("WireAuto", "=== Processing contact ${globalIndex + 1}/${contactNames.size}: $contactName ===")
-                    debugLog("CONTACT", "Processing contact ${globalIndex + 1}/${contactNames.size}: $contactName")
+                    // ============================================================
+                    // PROCESSING CONTACT FROM PRE-SCANNED LIST
+                    // ============================================================
+                    // Step 1: Contact ko search karo
+                    // Step 2: Conversation open karo
+                    // Step 3: Message bhejo
+                    // Step 4: Next contact par jao
+                    // ============================================================
+                    android.util.Log.i("WireAuto", "=== Processing contact ${globalIndex + 1}/${contactNames.size} from list: $contactName ===")
+                    debugLog("CONTACT", "Processing contact ${globalIndex + 1}/${contactNames.size} from pre-scanned list: $contactName")
                     updateNotification("Sending to $contactName (${globalIndex + 1}/${contactNames.size})...")
                     sendProgressBroadcast("Sending to $contactName...", contactsSent)
                     
-                    // Phase 2: Contact Search Logic
+                    // Phase 2: Contact Search Logic - Pre-scanned list se contact ko search karo
+                    debugLog("SEARCH", "Searching for contact from pre-scanned list: $contactName")
                     val searchResult = searchAndSelectContact(contactName)
                     
                     if (!searchResult) {
