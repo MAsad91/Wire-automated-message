@@ -3614,6 +3614,22 @@ class WireAutomationService : AccessibilityService() {
         }
     }
     
+    /**
+     * Helper: Find all clickable nodes recursively (for search results)
+     */
+    private fun findAllClickableNodesRecursive(root: AccessibilityNodeInfo, result: MutableList<AccessibilityNodeInfo>) {
+        if (root.isClickable) {
+            result.add(root)
+        }
+        
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i)
+            if (child != null) {
+                findAllClickableNodesRecursive(child, result)
+            }
+        }
+    }
+    
     private fun findClickableNodeAtBounds(root: AccessibilityNodeInfo, bounds: android.graphics.Rect): AccessibilityNodeInfo? {
         val rootBounds = android.graphics.Rect()
         root.getBoundsInScreen(rootBounds)
@@ -4466,7 +4482,7 @@ class WireAutomationService : AccessibilityService() {
             try {
                 // Step 1: Find message input field
                 var root = getRootWithRetry(maxRetries = 3, delayMs = 500)
-                val messageInput = findMessageInput(root)
+                val messageInput = root?.let { findMessageInput(it) }
                 
                 if (messageInput == null) {
                     android.util.Log.w("WireAuto", "Message input not found (attempt $attempt)")
@@ -4507,7 +4523,13 @@ class WireAutomationService : AccessibilityService() {
                 
                 // Step 5: Find and click send button
                 root = getRootWithRetry(maxRetries = 3, delayMs = 500)
-                val sendButton = findSendButton(root) ?: findSendButtonNearInput(root, messageInput)
+                val sendButton = if (root != null && messageInput != null) {
+                    val rootNonNull = root
+                    val inputNonNull = messageInput
+                    findSendButton(rootNonNull) ?: findSendButtonNearInput(rootNonNull, inputNonNull)
+                } else {
+                    null
+                }
                 
                 if (sendButton == null) {
                     android.util.Log.w("WireAuto", "Send button not found (attempt $attempt)")
@@ -4537,7 +4559,7 @@ class WireAutomationService : AccessibilityService() {
                 
                 // Step 6: Verify message was sent (check if input is empty)
                 root = getRootWithRetry(maxRetries = 3, delayMs = 500)
-                val refreshedInput = findMessageInput(root)
+                val refreshedInput = root?.let { findMessageInput(it) }
                 val inputText = refreshedInput?.text?.toString()?.trim() ?: ""
                 
                 if (inputText.isEmpty()) {
@@ -4635,7 +4657,7 @@ class WireAutomationService : AccessibilityService() {
         
         val cleanName = contactName.trim()
         val allNodes = mutableListOf<AccessibilityNodeInfo>()
-        findAllClickableNodes(root, allNodes)
+        findAllClickableNodesRecursive(root, allNodes)
         
         for (node in allNodes) {
             val text = node.text?.toString()?.trim() ?: ""
@@ -4671,20 +4693,5 @@ class WireAutomationService : AccessibilityService() {
         return contacts
     }
     
-    /**
-     * Helper: Find all clickable nodes recursively
-     */
-    private fun findAllClickableNodes(root: AccessibilityNodeInfo, result: MutableList<AccessibilityNodeInfo>) {
-        if (root.isClickable) {
-            result.add(root)
-        }
-        
-        for (i in 0 until root.childCount) {
-            val child = root.getChild(i)
-            if (child != null) {
-                findAllClickableNodes(child, result)
-            }
-        }
-    }
 }
 
