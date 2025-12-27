@@ -54,6 +54,10 @@ class WireAutomationService : AccessibilityService() {
         "H1.o0", "H1.O0", "H1.oo", "H10.o0"
     )
 
+    // Professional-grade contact handling: Session tracking
+    private val sessionSentList = mutableSetOf<String>() // Track exact contact names/IDs sent in this session
+    private var lastPersonMessaged: String? = null // Track last person messaged for verification
+
     companion object {
         const val ACTION_SEND_MESSAGES = "com.wireautomessenger.SEND_MESSAGES"
         const val WIRE_PACKAGE = "com.wire"
@@ -4353,10 +4357,18 @@ class WireAutomationService : AccessibilityService() {
     
     /**
      * Extract contact names from TextView elements in the current view
-     * Improved: Only extracts the FIRST TextView from each chat row (contact name), ignores message previews
+     * Professional-grade: Header exclusion, node ID tracking, context-aware deduplication
      */
     private fun extractContactNamesFromView(root: AccessibilityNodeInfo): Set<String> {
         val contactNames = mutableSetOf<String>()
+        
+        // Get screen dimensions for header exclusion
+        val displayMetrics = resources.displayMetrics
+        val screenHeight = displayMetrics.heightPixels
+        val headerThreshold = (screenHeight * 0.15).toInt() // Top 15% of screen
+        
+        android.util.Log.d("WireAuto", "Screen height: $screenHeight, Header threshold (15%): $headerThreshold")
+        debugLog("EXTRACT", "Header exclusion: Ignoring top $headerThreshold pixels (15% of screen)")
         
         // Strategy 1: Find RecyclerView first (conversation list)
         val recyclerView = findRecyclerView(root)
@@ -4370,17 +4382,28 @@ class WireAutomationService : AccessibilityService() {
         findAllClickableNodesRecursive(searchRoot, clickableRows)
         
         // Filter to only get rows that are likely chat items (not buttons, search bar, etc.)
+        // AND exclude header area (top 15% of screen)
         val chatRows = clickableRows.filter { row ->
             val bounds = android.graphics.Rect()
             row.getBoundsInScreen(bounds)
             val className = row.className?.toString() ?: ""
             
+            // Header & Profile Exclusion: Ignore top 15% of screen
+            val isInHeaderArea = bounds.top < headerThreshold
+            
             // Must be a reasonable size (chat rows are typically tall)
-            bounds.height() > 50 && 
+            val hasReasonableSize = bounds.height() > 50
             // Must not be a button
-            !className.contains("Button", ignoreCase = true) &&
+            val isNotButton = !className.contains("Button", ignoreCase = true)
             // Must have children (chat rows contain TextViews)
-            row.childCount > 0
+            val hasChildren = row.childCount > 0
+            
+            if (isInHeaderArea) {
+                android.util.Log.v("WireAuto", "Excluding node in header area: top=${bounds.top}, threshold=$headerThreshold")
+                debugLog("EXTRACT", "Excluding node in header area (top ${bounds.top} < $headerThreshold)")
+            }
+            
+            !isInHeaderArea && hasReasonableSize && isNotButton && hasChildren
         }
         
         android.util.Log.d("WireAuto", "Found ${chatRows.size} potential chat rows")
@@ -4394,7 +4417,7 @@ class WireAutomationService : AccessibilityService() {
         )
         
         // For each chat row, extract ONLY the FIRST TextView (contact name)
-        // Ignore the second TextView (message preview)
+        // Context-Aware Deduplication: Track exact UI Node ID or exact string
         for (chatRow in chatRows) {
             val textViewsInRow = mutableListOf<AccessibilityNodeInfo>()
             
@@ -4469,13 +4492,32 @@ class WireAutomationService : AccessibilityService() {
             // Clean and sanitize the name
             val cleanName = sanitizeContactName(nameText)
             
+            // Context-Aware Deduplication: Create unique identifier for this contact row
+            // Use node ID (viewIdResourceName) if available, otherwise use exact string
+            val nodeId = firstTextView.viewIdResourceName ?: ""
+            val uniqueIdentifier = if (nodeId.isNotBlank()) {
+                "$nodeId|$cleanName" // Use node ID + name for uniqueness
+            } else {
+                // Fallback: Use bounds position + name for uniqueness
+                val bounds = android.graphics.Rect()
+                firstTextView.getBoundsInScreen(bounds)
+                "${bounds.left},${bounds.top}|$cleanName"
+            }
+            
             // Filter out guest contacts and validate
+            // DO NOT merge names automatically - keep 'M.Asad' and 'Muhammad Asad Asif' separate
             if (cleanName.isNotBlank() && 
                 cleanName.length >= 2 && 
                 cleanName.length <= 100 &&
-                !cleanName.lowercase().contains("guest")) {
-                    contactNames.add(cleanName)
-                android.util.Log.v("WireAuto", "Added contact name: $cleanName (original: $text)")
+                !cleanName.lowercase().contains("guest") &&
+                !sessionSentList.contains(uniqueIdentifier)) { // Check if already processed
+                contactNames.add(cleanName)
+                sessionSentList.add(uniqueIdentifier) // Track this exact contact row
+                android.util.Log.v("WireAuto", "Added contact name: $cleanName (ID: $uniqueIdentifier)")
+                debugLog("EXTRACT", "Added contact: $cleanName (unique ID: $uniqueIdentifier)")
+            } else if (sessionSentList.contains(uniqueIdentifier)) {
+                android.util.Log.v("WireAuto", "Skipping duplicate contact: $cleanName (already in sessionSentList)")
+                debugLog("EXTRACT", "Skipping duplicate: $cleanName (ID: $uniqueIdentifier)")
             }
             
             // Also check content description (but split if it contains colon)
@@ -4486,11 +4528,21 @@ class WireAutomationService : AccessibilityService() {
                     contentDesc
                 }
                 val cleanDesc = sanitizeContactName(nameDesc)
+                val descUniqueId = if (nodeId.isNotBlank()) {
+                    "$nodeId|$cleanDesc"
+                } else {
+                    val bounds = android.graphics.Rect()
+                    firstTextView.getBoundsInScreen(bounds)
+                    "${bounds.left},${bounds.top}|$cleanDesc"
+                }
+                
                 if (cleanDesc.isNotBlank() && 
                     cleanDesc.length >= 2 && 
-                    !cleanDesc.lowercase().contains("guest")) {
+                    !cleanDesc.lowercase().contains("guest") &&
+                    !sessionSentList.contains(descUniqueId)) {
                     contactNames.add(cleanDesc)
-                    android.util.Log.v("WireAuto", "Added contact name from contentDesc: $cleanDesc")
+                    sessionSentList.add(descUniqueId)
+                    android.util.Log.v("WireAuto", "Added contact name from contentDesc: $cleanDesc (ID: $descUniqueId)")
                 }
             }
         }
@@ -4712,6 +4764,23 @@ class WireAutomationService : AccessibilityService() {
             
             for ((index, contactName) in batch.withIndex()) {
                 val globalIndex = batchStart + index
+                
+                // Context-Aware Deduplication: Skip if already sent in this session
+                if (sessionSentList.contains(contactName)) {
+                    android.util.Log.w("WireAuto", "Skipping duplicate contact: $contactName (already sent in this session)")
+                    debugLog("DEDUP", "Skipping duplicate contact: $contactName (already in sessionSentList)")
+                    contactResults.add(com.wireautomessenger.model.ContactResult(
+                        name = contactName,
+                        status = com.wireautomessenger.model.ContactStatus.SKIPPED,
+                        errorMessage = "Already sent in this session",
+                        position = globalIndex + 1
+                    ))
+                    reportWriter.append("${dateFormat.format(Date())} | SKIPPED | $contactName | Already sent in this session\n")
+                    reportWriter.flush()
+                    sendContactUpdate(contactName, "skipped", globalIndex + 1, "Already sent in this session")
+                    continue
+                }
+                
                 contactsProcessed++
                 
                 try {
@@ -4744,6 +4813,8 @@ class WireAutomationService : AccessibilityService() {
                     
                     if (messageSent) {
                         contactsSent++
+                        // Mark as sent in session tracking
+                        sessionSentList.add(contactName)
                         contactResults.add(com.wireautomessenger.model.ContactResult(
                             name = contactName,
                             status = com.wireautomessenger.model.ContactStatus.SENT,
@@ -4753,7 +4824,7 @@ class WireAutomationService : AccessibilityService() {
                         reportWriter.append("${dateFormat.format(Date())} | SUCCESS | $contactName | Message sent\n")
                         reportWriter.flush() // Flush to ensure report is updated immediately after each contact
                         sendContactUpdate(contactName, "sent", globalIndex + 1, null)
-                        debugLog("SUCCESS", "Message sent successfully to $contactName")
+                        debugLog("SUCCESS", "Message sent successfully to $contactName (added to sessionSentList)")
                     } else {
                         contactResults.add(com.wireautomessenger.model.ContactResult(
                             name = contactName,
@@ -4912,13 +4983,25 @@ class WireAutomationService : AccessibilityService() {
         }
         delay(2000) // Wait for conversation to open
         
+        // Double-Check After Opening Chat (The "Pro" Layer)
+        // Read name from Chat Toolbar/Header and verify it matches
+        val verified = verifyOpenedChatName(sanitizedName)
+        if (!verified) {
+            android.util.Log.w("WireAuto", "Chat verification failed - wrong contact opened")
+            debugLog("VERIFY", "Chat verification failed - wrong contact opened, going back")
+            // Press Back and return false
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            delay(1000)
+            return false
+        }
+        
         return true
     }
     
     /**
-     * Helper: Find search result with flexible matching
-     * 1. Try exact match
-     * 2. Try flexible match (starts with search term)
+     * Helper: Find search result with reliable matching
+     * 1. Prioritize exact match
+     * 2. Find closest string match if multiple results
      * 3. Fallback to first clickable item in search results
      */
     private fun findFlexibleSearchResult(root: AccessibilityNodeInfo?, searchName: String): AccessibilityNodeInfo? {
@@ -4953,7 +5036,8 @@ class WireAutomationService : AccessibilityService() {
         android.util.Log.d("WireAuto", "Found ${searchResultsNodes.size} potential search result nodes")
         debugLog("SEARCH", "Found ${searchResultsNodes.size} potential search result nodes")
         
-        // Strategy 1: Try exact match (case-insensitive)
+        // Strategy 1: Prioritize exact match (case-insensitive)
+        val exactMatches = mutableListOf<Pair<AccessibilityNodeInfo, String>>()
         for (node in searchResultsNodes) {
             val text = node.text?.toString()?.trim() ?: ""
             val contentDesc = node.contentDescription?.toString()?.trim() ?: ""
@@ -4961,41 +5045,64 @@ class WireAutomationService : AccessibilityService() {
             // Check both text and contentDescription
             val nodeTextLower = text.lowercase()
             val nodeDescLower = contentDesc.lowercase()
+            val displayText = if (text.isNotBlank()) text else contentDesc
             
             // Exact match check
             if (nodeTextLower == cleanSearchName || nodeDescLower == cleanSearchName) {
-                android.util.Log.d("WireAuto", "Found exact match: '$text' == '$searchName'")
-                debugLog("SEARCH", "Found exact match: '$text' == '$searchName'")
-                return node
+                exactMatches.add(Pair(node, displayText))
             }
         }
         
-        // Strategy 2: Flexible matching - check if text or contentDescription starts with search term
+        if (exactMatches.isNotEmpty()) {
+            // If multiple exact matches, return the first one
+            val (node, displayText) = exactMatches.first()
+            android.util.Log.d("WireAuto", "Found exact match: '$displayText' == '$searchName'")
+            debugLog("SEARCH", "Found exact match: '$displayText' == '$searchName'")
+            return node
+        }
+        
+        // Strategy 2: Find closest string match (for cases like 'M.Asad' vs 'Muhammad Asad Asif')
+        val candidateMatches = mutableListOf<Triple<AccessibilityNodeInfo, String, Int>>()
+        
         for (node in searchResultsNodes) {
             val text = node.text?.toString()?.trim() ?: ""
             val contentDesc = node.contentDescription?.toString()?.trim() ?: ""
+            val displayText = if (text.isNotBlank()) text else contentDesc
             
             val nodeTextLower = text.lowercase()
             val nodeDescLower = contentDesc.lowercase()
             
-            // Check if text or contentDescription starts with search name
+            // Calculate similarity score
+            var score = 0
+            
+            // Check if starts with search name (higher score)
             if (nodeTextLower.startsWith(cleanSearchName) || nodeDescLower.startsWith(cleanSearchName)) {
-                // Allow variations like "MS (Online)" or "Muhammad Saleem" if it starts with "MS"
-                val displayText = if (text.isNotBlank()) text else contentDesc
-                android.util.Log.d("WireAuto", "Found flexible match: '$displayText' starts with '$searchName'")
-                debugLog("SEARCH", "Found flexible match: '$displayText' starts with '$searchName'")
-                return node
+                score = 100
+            } else if (nodeTextLower.contains(cleanSearchName) || nodeDescLower.contains(cleanSearchName)) {
+                // Contains search name (lower score)
+                score = 50
+            } else {
+                // Calculate Levenshtein-like similarity for short names
+                if (cleanSearchName.length <= 3) {
+                    val similarity = calculateStringSimilarity(cleanSearchName, nodeTextLower)
+                    if (similarity > 0.5) {
+                        score = (similarity * 30).toInt()
+                    }
+                }
             }
             
-            // Also check if search name is contained in the text (for cases like "Muhammad Saleem" matching "MS")
-            // But only if the search name is short (2-3 chars) to avoid false matches
-            if (cleanSearchName.length <= 3 && 
-                (nodeTextLower.contains(cleanSearchName) || nodeDescLower.contains(cleanSearchName))) {
-                val displayText = if (text.isNotBlank()) text else contentDesc
-                android.util.Log.d("WireAuto", "Found partial match: '$displayText' contains '$searchName'")
-                debugLog("SEARCH", "Found partial match: '$displayText' contains '$searchName'")
-                return node
+            if (score > 0) {
+                candidateMatches.add(Triple(node, displayText, score))
             }
+        }
+        
+        // Sort by score (highest first) and return the best match
+        if (candidateMatches.isNotEmpty()) {
+            val sortedMatches = candidateMatches.sortedByDescending { it.third }
+            val (bestNode, bestText, bestScore) = sortedMatches.first()
+            android.util.Log.d("WireAuto", "Found closest match: '$bestText' (score: $bestScore) for '$searchName'")
+            debugLog("SEARCH", "Found closest match: '$bestText' (score: $bestScore) for '$searchName'")
+            return bestNode
         }
         
         // Strategy 3: Fallback to first clickable item in search results
@@ -5012,6 +5119,103 @@ class WireAutomationService : AccessibilityService() {
         android.util.Log.w("WireAuto", "No search results found for: $searchName")
         debugLog("SEARCH", "No search results found for: $searchName")
         return null
+    }
+    
+    /**
+     * Helper: Calculate string similarity (simple Levenshtein-like)
+     */
+    private fun calculateStringSimilarity(str1: String, str2: String): Double {
+        if (str1 == str2) return 1.0
+        if (str1.isEmpty() || str2.isEmpty()) return 0.0
+        
+        // Check if str1 is contained in str2
+        if (str2.contains(str1)) {
+            return str1.length.toDouble() / str2.length.coerceAtLeast(str1.length)
+        }
+        
+        // Simple character overlap
+        var matches = 0
+        for (char in str1) {
+            if (str2.contains(char)) {
+                matches++
+            }
+        }
+        
+        return matches.toDouble() / str1.length.coerceAtLeast(str2.length)
+    }
+    
+    /**
+     * Double-Check After Opening Chat: Verify the opened chat name matches
+     * Read name from Chat Toolbar/Header and compare with expected name
+     */
+    private suspend fun verifyOpenedChatName(expectedName: String): Boolean {
+        debugLog("VERIFY", "Verifying opened chat name: expected '$expectedName'")
+        
+        delay(1000) // Wait for chat to fully load
+        
+        val root = getRootWithRetry(maxRetries = 3, delayMs = 500)
+        if (root == null || root.packageName != WIRE_PACKAGE) {
+            android.util.Log.w("WireAuto", "Cannot access Wire app for verification")
+            return false
+        }
+        
+        // Find toolbar/header area (usually at top of screen)
+        val toolbarNodes = mutableListOf<AccessibilityNodeInfo>()
+        findAllNodesByClassName(root, "androidx.appcompat.widget.Toolbar", toolbarNodes)
+        findAllNodesByClassName(root, "android.widget.Toolbar", toolbarNodes)
+        
+        // Also search for TextViews in top 20% of screen (toolbar area)
+        val displayMetrics = resources.displayMetrics
+        val screenHeight = displayMetrics.heightPixels
+        val toolbarThreshold = (screenHeight * 0.20).toInt()
+        
+        val allTextViews = mutableListOf<AccessibilityNodeInfo>()
+        findAllNodesByClassName(root, "android.widget.TextView", allTextViews)
+        
+        // Find TextViews in toolbar area
+        val toolbarTextViews = allTextViews.filter { textView ->
+            val bounds = android.graphics.Rect()
+            textView.getBoundsInScreen(bounds)
+            bounds.top < toolbarThreshold && textView.text?.toString()?.trim()?.isNotBlank() == true
+        }
+        
+        // Get the actual chat name from toolbar
+        val actualChatName = toolbarTextViews.firstOrNull()?.text?.toString()?.trim() ?: ""
+        
+        if (actualChatName.isBlank()) {
+            android.util.Log.w("WireAuto", "Could not read chat name from toolbar")
+            debugLog("VERIFY", "Could not read chat name from toolbar - assuming correct")
+            return true // Assume correct if we can't verify
+        }
+        
+        val sanitizedExpected = sanitizeContactName(expectedName).lowercase()
+        val sanitizedActual = sanitizeContactName(actualChatName).lowercase()
+        
+        android.util.Log.d("WireAuto", "Chat verification: expected='$sanitizedExpected', actual='$sanitizedActual'")
+        debugLog("VERIFY", "Chat verification: expected='$sanitizedExpected', actual='$sanitizedActual'")
+        
+        // Check if it's the same person as last messaged
+        if (lastPersonMessaged != null && sanitizedActual == lastPersonMessaged?.lowercase()) {
+            android.util.Log.w("WireAuto", "Same person as last messaged: $actualChatName")
+            debugLog("VERIFY", "Same person as last messaged: $actualChatName - going back")
+            return false // Same person - go back
+        }
+        
+        // Check if actual name matches expected (exact or starts with)
+        val matches = sanitizedActual == sanitizedExpected || 
+                     sanitizedActual.startsWith(sanitizedExpected) ||
+                     sanitizedExpected.startsWith(sanitizedActual)
+        
+        if (matches) {
+            lastPersonMessaged = sanitizedActual // Update last person messaged
+            android.util.Log.d("WireAuto", "Chat verification passed: $actualChatName")
+            debugLog("VERIFY", "Chat verification passed: $actualChatName")
+            return true
+        } else {
+            android.util.Log.w("WireAuto", "Chat verification failed: expected '$expectedName', got '$actualChatName'")
+            debugLog("VERIFY", "Chat verification failed: expected '$expectedName', got '$actualChatName'")
+            return false
+        }
     }
     
     /**
