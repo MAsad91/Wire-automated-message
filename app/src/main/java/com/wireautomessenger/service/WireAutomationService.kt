@@ -3318,11 +3318,52 @@ class WireAutomationService : AccessibilityService() {
             }
         }
         
-        // Strategy 3: Find by hint text "Message" or "Type a message" (avoiding top 15% and CONVERSATIONS)
+        // Strategy 3: Broaden detection - Find by hint text "Message" or "Type a message" (avoiding top 15% and CONVERSATIONS)
         val allEditTexts = mutableListOf<AccessibilityNodeInfo>()
         findAllNodesByClassName(root, "android.widget.EditText", allEditTexts)
         findAllNodesByClassName(root, "androidx.appcompat.widget.AppCompatEditText", allEditTexts)
         
+        // Get screen dimensions for bottom 20% detection
+        val bottom20PercentThreshold = (screenHeight * 0.80).toInt()
+        
+        // Priority 1: Look for "Type a message" text (as seen in screenshot)
+        for (editText in allEditTexts) {
+            val contentDesc = editText.contentDescription?.toString() ?: ""
+            val hint = editText.hintText?.toString() ?: ""
+            val nodeText = editText.text?.toString() ?: ""
+            val resourceId = editText.viewIdResourceName ?: ""
+            
+            // CRITICAL: Exclude search boxes
+            if (contentDesc.lowercase().contains("search") || 
+                hint.lowercase().contains("search") || 
+                resourceId.lowercase().contains("search")) {
+                continue
+            }
+            
+            // CRITICAL: Exclude CONVERSATIONS TextView
+            if (nodeText.contains("CONVERSATIONS", ignoreCase = true)) {
+                continue
+            }
+            
+            val bounds = android.graphics.Rect()
+            editText.getBoundsInScreen(bounds)
+            
+            // Check if in top 15% of screen
+            if (bounds.top <= top15PercentThreshold) {
+                continue
+            }
+            
+            // Look for "Type a message" text (exact match or contains)
+            if (hint.contains("Type a message", ignoreCase = true) ||
+                contentDesc.contains("Type a message", ignoreCase = true) ||
+                nodeText.contains("Type a message", ignoreCase = true)) {
+                android.util.Log.d("WireAuto", "Message input found via 'Type a message' text at y=${bounds.top}")
+                debugLog("INPUT", "Found input with 'Type a message' text at y=${bounds.top}")
+                return editText
+            }
+        }
+        
+        // Priority 2: Look for Editable trait or any element with "message" hint
         for (editText in allEditTexts) {
             val contentDesc = editText.contentDescription?.toString()?.lowercase() ?: ""
             val hint = editText.hintText?.toString()?.lowercase() ?: ""
@@ -3336,36 +3377,63 @@ class WireAutomationService : AccessibilityService() {
             
             // CRITICAL: Exclude CONVERSATIONS TextView
             if (nodeText.contains("CONVERSATIONS", ignoreCase = true)) {
-                android.util.Log.w("WireAuto", "Skipping EditText with CONVERSATIONS text: $nodeText")
                 continue
             }
             
-            // Check if in top 15% of screen
             val bounds = android.graphics.Rect()
             editText.getBoundsInScreen(bounds)
+            
+            // Check if in top 15% of screen
             if (bounds.top <= top15PercentThreshold) {
-                android.util.Log.w("WireAuto", "Skipping EditText in top 15% of screen (y=${bounds.top}, threshold=$top15PercentThreshold)")
                 continue
             }
             
-            // Prefer message input fields with "Message" hint
-            if (hint.contains("message", ignoreCase = true) || 
-                contentDesc.contains("message", ignoreCase = true)) {
-                android.util.Log.d("WireAuto", "Message input found via hint 'Message' at y=${bounds.top}")
-                debugLog("INPUT", "Found input with 'Message' hint at y=${bounds.top}")
-                return editText
-            }
+            // Check for Editable trait (isEditable)
+            val isEditable = editText.isEditable
             
-            // Also check for "Type a message" hint
-            if (hint.contains("type a message", ignoreCase = true) ||
-                contentDesc.contains("type a message", ignoreCase = true)) {
-                android.util.Log.d("WireAuto", "Message input found via hint 'Type a message' at y=${bounds.top}")
-                debugLog("INPUT", "Found input with 'Type a message' hint at y=${bounds.top}")
+            // Prefer message input fields with "Message" hint or Editable trait
+            if ((hint.contains("message", ignoreCase = true) || 
+                 contentDesc.contains("message", ignoreCase = true)) ||
+                isEditable) {
+                android.util.Log.d("WireAuto", "Message input found via hint 'Message' or Editable trait at y=${bounds.top}")
+                debugLog("INPUT", "Found input with 'Message' hint or Editable trait at y=${bounds.top}")
                 return editText
             }
         }
         
-        // Strategy 4: If no specific message input found, return first non-search EditText (but still avoid top 15% and CONVERSATIONS)
+        // Strategy 4: Find ONLY EditText or last clickable element at bottom 20% of screen
+        val bottomEditTexts = mutableListOf<Pair<AccessibilityNodeInfo, Int>>()
+        for (editText in allEditTexts) {
+            val contentDesc = editText.contentDescription?.toString()?.lowercase() ?: ""
+            val hint = editText.hintText?.toString()?.lowercase() ?: ""
+            val nodeText = editText.text?.toString() ?: ""
+            val bounds = android.graphics.Rect()
+            editText.getBoundsInScreen(bounds)
+            
+            // Must be in bottom 20% of screen
+            if (bounds.top < bottom20PercentThreshold) {
+                continue
+            }
+            
+            // Exclude search and CONVERSATIONS
+            if (!contentDesc.contains("search") && 
+                !hint.contains("search") &&
+                !nodeText.contains("CONVERSATIONS", ignoreCase = true)) {
+                bottomEditTexts.add(Pair(editText, bounds.top))
+            }
+        }
+        
+        // Return the lowest (most bottom) EditText in bottom 20%
+        if (bottomEditTexts.isNotEmpty()) {
+            val lowestEditText = bottomEditTexts.maxByOrNull { it.second }
+            if (lowestEditText != null) {
+                android.util.Log.d("WireAuto", "Message input found in bottom 20% at y=${lowestEditText.second}")
+                debugLog("INPUT", "Found input in bottom 20% at y=${lowestEditText.second}")
+                return lowestEditText.first
+            }
+        }
+        
+        // Strategy 5: Fallback - first non-search EditText (but still avoid top 15% and CONVERSATIONS)
         for (editText in allEditTexts) {
             val contentDesc = editText.contentDescription?.toString()?.lowercase() ?: ""
             val hint = editText.hintText?.toString()?.lowercase() ?: ""
@@ -5264,41 +5332,190 @@ class WireAutomationService : AccessibilityService() {
             return false
         }
         
-        // Click on search result
-        debugLog("SEARCH", "Clicking on search result for: $sanitizedName")
-        if (!clickNodeWithGesture(searchResult)) {
-            searchResult.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        }
-        delay(2000) // Wait for conversation to open
+        // Robust Search Result Clicking: Use gesture click at center of node
+        debugLog("SEARCH", "Clicking on search result for: $sanitizedName using robust gesture click")
+        android.util.Log.i("WireAuto", "Clicking search result using gesture click at center")
         
-        // Fix 'Conversations' Header Confusion: Check if still on search screen
-        root = getRootWithRetry(maxRetries = 3, delayMs = 500)
-        val stillOnSearchScreen = root?.let { 
-            val searchBarAfterClick = findSearchBar(it)
-            val searchInputAfterClick = findSearchInput(it)
-            val hasConversationsText = hasTextInView(it, "CONVERSATIONS")
-            
-            // If search bar is still visible or we see CONVERSATIONS text, we're still on search/home screen
-            searchBarAfterClick != null || searchInputAfterClick != null || hasConversationsText
-        } ?: false
+        // Get center coordinates of search result node
+        val resultBounds = android.graphics.Rect()
+        searchResult.getBoundsInScreen(resultBounds)
+        val centerX = resultBounds.centerX()
+        val centerY = resultBounds.centerY()
         
-        if (stillOnSearchScreen) {
-            android.util.Log.w("WireAuto", "Still on search screen after clicking result - clicking again")
-            debugLog("SEARCH", "Still on search screen - clicking search result again")
+        android.util.Log.d("WireAuto", "Search result bounds: $resultBounds, center: ($centerX, $centerY)")
+        debugLog("SEARCH", "Search result center coordinates: ($centerX, $centerY)")
+        
+        // Method 1: Gesture click at center of node
+        var clicked = false
+        try {
+            val stroke = android.accessibilityservice.GestureDescription.StrokeDescription(
+                android.graphics.Path().apply {
+                    moveTo(centerX.toFloat(), centerY.toFloat())
+                },
+                0, 100
+            )
+            val gesture = android.accessibilityservice.GestureDescription.Builder()
+                .addStroke(stroke)
+                .build()
             
-            // Find search result again and click
-            root = getRootWithRetry(maxRetries = 3, delayMs = 500)
-            val searchResultRetry = root?.let { findFlexibleSearchResult(it, sanitizedName) }
-            
-            if (searchResultRetry != null) {
-                debugLog("SEARCH", "Clicking search result again (retry)")
-                if (!clickNodeWithGesture(searchResultRetry)) {
-                    searchResultRetry.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            var gestureCompleted = false
+            val gestureResult = dispatchGesture(gesture, object : android.accessibilityservice.AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                    gestureCompleted = true
+                    clicked = true
                 }
-                delay(2000) // Wait for conversation to open again
-            } else {
-                android.util.Log.w("WireAuto", "Could not find search result for retry")
-                debugLog("ERROR", "Could not find search result for retry click")
+                override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                    android.util.Log.w("WireAuto", "Gesture click cancelled")
+                }
+            }, null)
+            
+            if (gestureResult) {
+                // Wait for gesture to complete
+                var waitAttempts = 0
+                while (!gestureCompleted && waitAttempts < 20) {
+                    delay(100)
+                    waitAttempts++
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("WireAuto", "Gesture click failed: ${e.message}")
+        }
+        
+        // Method 2: Fallback to regular click
+        if (!clicked) {
+            debugLog("SEARCH", "Gesture click failed, trying regular click")
+            if (!clickNodeWithGesture(searchResult)) {
+                searchResult.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            }
+        }
+        
+        // CRITICAL: Wait 3 seconds after clicking to allow chat UI to replace search UI
+        debugLog("SEARCH", "Waiting 3 seconds for chat UI to load after clicking search result")
+        delay(3000)
+        
+        // Verify Chat Entry: Check if we've left the search screen
+        var retryCount = 0
+        val maxRetries = 2
+        var stillOnSearchScreen = true
+        
+        while (retryCount <= maxRetries && stillOnSearchScreen) {
+            root = getRootWithRetry(maxRetries = 3, delayMs = 500)
+            stillOnSearchScreen = root?.let { 
+                val searchBarAfterClick = findSearchBar(it)
+                val searchInputAfterClick = findSearchInput(it)
+                val hasConversationsText = hasTextInView(it, "CONVERSATIONS")
+                
+                // If search bar is still visible or we see CONVERSATIONS text, we're still on search/home screen
+                searchBarAfterClick != null || searchInputAfterClick != null || hasConversationsText
+            } ?: true
+            
+            if (stillOnSearchScreen && retryCount < maxRetries) {
+                android.util.Log.w("WireAuto", "Still on search screen after click (retry ${retryCount + 1}/$maxRetries) - clicking again")
+                debugLog("SEARCH", "Still on search screen - clicking search result again (retry ${retryCount + 1})")
+                
+                // Find search result again and click
+                root = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                val searchResultRetry = root?.let { findFlexibleSearchResult(it, sanitizedName) }
+                
+                if (searchResultRetry != null) {
+                    // Get center coordinates for retry click
+                    val retryBounds = android.graphics.Rect()
+                    searchResultRetry.getBoundsInScreen(retryBounds)
+                    val retryCenterX = retryBounds.centerX()
+                    val retryCenterY = retryBounds.centerY()
+                    
+                    debugLog("SEARCH", "Clicking search result again at center ($retryCenterX, $retryCenterY)")
+                    
+                    // Try gesture click again
+                    try {
+                        val stroke = android.accessibilityservice.GestureDescription.StrokeDescription(
+                            android.graphics.Path().apply {
+                                moveTo(retryCenterX.toFloat(), retryCenterY.toFloat())
+                            },
+                            0, 100
+                        )
+                        val gesture = android.accessibilityservice.GestureDescription.Builder()
+                            .addStroke(stroke)
+                            .build()
+                        
+                        var gestureCompleted = false
+                        dispatchGesture(gesture, object : android.accessibilityservice.AccessibilityService.GestureResultCallback() {
+                            override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                                gestureCompleted = true
+                            }
+                            override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                                android.util.Log.w("WireAuto", "Retry gesture click cancelled")
+                            }
+                        }, null)
+                        
+                        var waitAttempts = 0
+                        while (!gestureCompleted && waitAttempts < 20) {
+                            delay(100)
+                            waitAttempts++
+                        }
+                    } catch (e: Exception) {
+                        // Fallback to regular click
+                        if (!clickNodeWithGesture(searchResultRetry)) {
+                            searchResultRetry.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        }
+                    }
+                    
+                    delay(3000) // Wait 3 seconds after retry click
+                } else {
+                    android.util.Log.w("WireAuto", "Could not find search result for retry")
+                    debugLog("ERROR", "Could not find search result for retry click")
+                }
+                
+                retryCount++
+            } else if (stillOnSearchScreen && retryCount >= maxRetries) {
+                // Fallback to Coordinate Click: If still on search screen after 2 retries, use coordinate-based click
+                android.util.Log.w("WireAuto", "Still on search screen after $maxRetries retries - using coordinate-based click")
+                debugLog("SEARCH", "Using coordinate-based click fallback at first search result location")
+                
+                root = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                val searchResultForCoord = root?.let { findFlexibleSearchResult(it, sanitizedName) }
+                
+                if (searchResultForCoord != null) {
+                    val coordBounds = android.graphics.Rect()
+                    searchResultForCoord.getBoundsInScreen(coordBounds)
+                    val coordX = coordBounds.centerX()
+                    val coordY = coordBounds.centerY()
+                    
+                    android.util.Log.i("WireAuto", "Performing coordinate-based click at ($coordX, $coordY)")
+                    debugLog("SEARCH", "Coordinate click at ($coordX, $coordY)")
+                    
+                    try {
+                        val stroke = android.accessibilityservice.GestureDescription.StrokeDescription(
+                            android.graphics.Path().apply {
+                                moveTo(coordX.toFloat(), coordY.toFloat())
+                            },
+                            0, 100
+                        )
+                        val gesture = android.accessibilityservice.GestureDescription.Builder()
+                            .addStroke(stroke)
+                            .build()
+                        
+                        var gestureCompleted = false
+                        dispatchGesture(gesture, object : android.accessibilityservice.AccessibilityService.GestureResultCallback() {
+                            override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                                gestureCompleted = true
+                            }
+                            override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                                android.util.Log.w("WireAuto", "Coordinate click gesture cancelled")
+                            }
+                        }, null)
+                        
+                        var waitAttempts = 0
+                        while (!gestureCompleted && waitAttempts < 30) {
+                            delay(100)
+                            waitAttempts++
+                        }
+                        delay(3000) // Wait 3 seconds after coordinate click
+                    } catch (e: Exception) {
+                        android.util.Log.e("WireAuto", "Coordinate click failed: ${e.message}")
+                    }
+                }
+                break
             }
         }
         
@@ -5634,8 +5851,34 @@ class WireAutomationService : AccessibilityService() {
             debugLog("MESSAGE", "Attempt $attempt/3 to send message to $contactName")
             
             try {
-                // Step 1: Find message input field
+                // Step 1: Verify Chat Entry - Ensure we've left the search screen
+                debugLog("MESSAGE", "Verifying chat entry - checking if search screen is gone")
                 var root = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                
+                // Check if still on search screen
+                val stillOnSearchScreen = root?.let { 
+                    val searchBar = findSearchBar(it)
+                    val searchInput = findSearchInput(it)
+                    val hasConversationsText = hasTextInView(it, "CONVERSATIONS")
+                    
+                    // If search bar is visible, we're still on search screen
+                    searchBar != null || searchInput != null || hasConversationsText
+                } ?: true
+                
+                if (stillOnSearchScreen) {
+                    android.util.Log.w("WireAuto", "Still on search screen - cannot send message (attempt $attempt)")
+                    debugLog("ERROR", "Still on search screen - chat not opened properly")
+                    if (attempt < 3) {
+                        delay(backoffDelays[attempt - 1])
+                        continue
+                    }
+                    return false
+                }
+                
+                debugLog("MESSAGE", "Chat entry verified - search screen is gone")
+                
+                // Step 2: Find message input field
+                root = getRootWithRetry(maxRetries = 3, delayMs = 500)
                 val messageInput = root?.let { findMessageInput(it) }
                 
                 if (messageInput == null) {
@@ -5647,14 +5890,55 @@ class WireAutomationService : AccessibilityService() {
                     return false
                 }
                 
-                // Step 2: Wait 2 seconds after search result click, then force click bottom-center
+                // Step 3: Force Focus on Input - dispatchGesture click at (500, ScreenHeight - 150)
+                debugLog("MESSAGE", "Force focusing on input field with gesture click")
+                val screenWidth = resources.displayMetrics.widthPixels
+                val screenHeight = resources.displayMetrics.heightPixels
+                val focusX = 500f
+                val focusY = (screenHeight - 150).toFloat()
+                
+                android.util.Log.d("WireAuto", "Force focusing input at coordinates: ($focusX, $focusY)")
+                debugLog("MESSAGE", "Force focusing input at ($focusX, $focusY) - 'Type a message' area")
+                
+                try {
+                    val stroke = android.accessibilityservice.GestureDescription.StrokeDescription(
+                        android.graphics.Path().apply {
+                            moveTo(focusX, focusY)
+                        },
+                        0, 100
+                    )
+                    val gesture = android.accessibilityservice.GestureDescription.Builder()
+                        .addStroke(stroke)
+                        .build()
+                    
+                    var gestureCompleted = false
+                    dispatchGesture(gesture, object : android.accessibilityservice.AccessibilityService.GestureResultCallback() {
+                        override fun onCompleted(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                            gestureCompleted = true
+                        }
+                        override fun onCancelled(gestureDescription: android.accessibilityservice.GestureDescription?) {
+                            android.util.Log.w("WireAuto", "Force focus gesture cancelled")
+                        }
+                    }, null)
+                    
+                    // Wait for gesture to complete
+                    var waitAttempts = 0
+                    while (!gestureCompleted && waitAttempts < 20) {
+                        delay(100)
+                        waitAttempts++
+                    }
+                    delay(500) // Additional delay after force focus
+                } catch (e: Exception) {
+                    android.util.Log.w("WireAuto", "Force focus gesture failed: ${e.message}")
+                    debugLog("WARN", "Force focus gesture failed, continuing: ${e.message}")
+                }
+                
+                // Step 4: Wait 2 seconds after search result click, then force click bottom-center
                 debugLog("MESSAGE", "Waiting 2 seconds after search result click...")
                 delay(2000) // Wait 2 seconds as requested
                 
                 // Force click on bottom-center of screen where input box is usually located
                 debugLog("MESSAGE", "Performing force click on bottom-center of screen...")
-                val screenWidth = resources.displayMetrics.widthPixels
-                val screenHeight = resources.displayMetrics.heightPixels
                 val bottomCenterX = screenWidth / 2
                 val bottomCenterY = (screenHeight * 0.85).toInt() // 85% down the screen (near bottom)
                 
