@@ -4887,23 +4887,26 @@ class WireAutomationService : AccessibilityService() {
             searchInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
             delay(100) // Human-like typing delay
         }
-        delay(1500) // Wait for search results to populate
         
-        // Step 4: Find and click EXACT matching result
+        // Increase search wait: Give search results extra 2 seconds to fully load
+        delay(3500) // Wait for search results to populate (1500ms + 2000ms extra)
+        debugLog("SEARCH", "Waiting for search results to fully load...")
+        
+        // Step 4: Find and click matching result (flexible matching)
         root = getRootWithRetry(maxRetries = 3, delayMs = 500)
-        val searchResult = findExactSearchResult(root, sanitizedName)
+        val searchResult = findFlexibleSearchResult(root, sanitizedName)
         
         if (searchResult == null) {
-            android.util.Log.w("WireAuto", "Exact search result not found for: $sanitizedName")
-            debugLog("WARN", "Exact search result not found for: $sanitizedName")
+            android.util.Log.w("WireAuto", "No search result found for: $sanitizedName")
+            debugLog("WARN", "No search result found for: $sanitizedName")
             // Close search
             performGlobalAction(GLOBAL_ACTION_BACK)
             delay(500)
             return false
         }
         
-        // Click on exact search result
-        debugLog("SEARCH", "Clicking on exact search result for: $sanitizedName")
+        // Click on search result
+        debugLog("SEARCH", "Clicking on search result for: $sanitizedName")
         if (!clickNodeWithGesture(searchResult)) {
             searchResult.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         }
@@ -4913,22 +4916,49 @@ class WireAutomationService : AccessibilityService() {
     }
     
     /**
-     * Helper: Find search result that EXACTLY matches the contact name
-     * Verification: After typing, click the one that exactly matches
+     * Helper: Find search result with flexible matching
+     * 1. Try exact match
+     * 2. Try flexible match (starts with search term)
+     * 3. Fallback to first clickable item in search results
      */
-    private fun findExactSearchResult(root: AccessibilityNodeInfo?, searchName: String): AccessibilityNodeInfo? {
+    private fun findFlexibleSearchResult(root: AccessibilityNodeInfo?, searchName: String): AccessibilityNodeInfo? {
         if (root == null) return null
         
         val cleanSearchName = searchName.trim().lowercase()
         val allNodes = mutableListOf<AccessibilityNodeInfo>()
         findAllClickableNodesRecursive(root, allNodes)
         
-        // First, try to find exact match
-        for (node in allNodes) {
+        android.util.Log.d("WireAuto", "Searching for '$searchName' in ${allNodes.size} clickable nodes")
+        debugLog("SEARCH", "Searching for '$searchName' in ${allNodes.size} clickable nodes")
+        
+        // Try to find conversation_list or contact_name resource IDs first
+        val searchResultsArea = findNodeByResourceId(root, "com.wire:id/conversation_list")
+            ?: findNodeByResourceId(root, "com.wire:id/contact_name")
+        
+        val searchResultsNodes = if (searchResultsArea != null) {
+            // Get all clickable nodes within the search results area
+            val nodesInArea = mutableListOf<AccessibilityNodeInfo>()
+            findAllClickableNodesRecursive(searchResultsArea, nodesInArea)
+            nodesInArea
+        } else {
+            // Fallback: use all nodes but prioritize those that look like search results
+            allNodes.filter { node ->
+                val bounds = android.graphics.Rect()
+                node.getBoundsInScreen(bounds)
+                // Filter out very small nodes (likely buttons) and very large nodes (likely containers)
+                bounds.height() > 40 && bounds.height() < 200
+            }
+        }
+        
+        android.util.Log.d("WireAuto", "Found ${searchResultsNodes.size} potential search result nodes")
+        debugLog("SEARCH", "Found ${searchResultsNodes.size} potential search result nodes")
+        
+        // Strategy 1: Try exact match (case-insensitive)
+        for (node in searchResultsNodes) {
             val text = node.text?.toString()?.trim() ?: ""
             val contentDesc = node.contentDescription?.toString()?.trim() ?: ""
             
-            // Check for exact match (case-insensitive)
+            // Check both text and contentDescription
             val nodeTextLower = text.lowercase()
             val nodeDescLower = contentDesc.lowercase()
             
@@ -4938,29 +4968,69 @@ class WireAutomationService : AccessibilityService() {
                 debugLog("SEARCH", "Found exact match: '$text' == '$searchName'")
                 return node
             }
+        }
+        
+        // Strategy 2: Flexible matching - check if text or contentDescription starts with search term
+        for (node in searchResultsNodes) {
+            val text = node.text?.toString()?.trim() ?: ""
+            val contentDesc = node.contentDescription?.toString()?.trim() ?: ""
             
-            // Also check if the text starts with the search name (common in search results)
-            if ((nodeTextLower.startsWith(cleanSearchName) || nodeDescLower.startsWith(cleanSearchName)) &&
-                text.length <= searchName.length + 10) { // Allow small variations
-                // Verify it's not a message preview (shouldn't contain colon after the name)
-                val afterName = if (nodeTextLower.startsWith(cleanSearchName)) {
-                    nodeTextLower.substring(cleanSearchName.length).trim()
-                } else {
-                    nodeDescLower.substring(cleanSearchName.length).trim()
-                }
-                
-                // If it's just the name or name with small suffix, it's a match
-                if (afterName.isEmpty() || 
-                    (!afterName.contains(":") && afterName.length <= 5)) {
-                    android.util.Log.d("WireAuto", "Found near-exact match: '$text' starts with '$searchName'")
-                    debugLog("SEARCH", "Found near-exact match: '$text' starts with '$searchName'")
-                    return node
-                }
+            val nodeTextLower = text.lowercase()
+            val nodeDescLower = contentDesc.lowercase()
+            
+            // Check if text or contentDescription starts with search name
+            if (nodeTextLower.startsWith(cleanSearchName) || nodeDescLower.startsWith(cleanSearchName)) {
+                // Allow variations like "MS (Online)" or "Muhammad Saleem" if it starts with "MS"
+                val displayText = if (text.isNotBlank()) text else contentDesc
+                android.util.Log.d("WireAuto", "Found flexible match: '$displayText' starts with '$searchName'")
+                debugLog("SEARCH", "Found flexible match: '$displayText' starts with '$searchName'")
+                return node
+            }
+            
+            // Also check if search name is contained in the text (for cases like "Muhammad Saleem" matching "MS")
+            // But only if the search name is short (2-3 chars) to avoid false matches
+            if (cleanSearchName.length <= 3 && 
+                (nodeTextLower.contains(cleanSearchName) || nodeDescLower.contains(cleanSearchName))) {
+                val displayText = if (text.isNotBlank()) text else contentDesc
+                android.util.Log.d("WireAuto", "Found partial match: '$displayText' contains '$searchName'")
+                debugLog("SEARCH", "Found partial match: '$displayText' contains '$searchName'")
+                return node
             }
         }
         
-        android.util.Log.w("WireAuto", "No exact match found for: $searchName")
-        debugLog("SEARCH", "No exact match found for: $searchName")
+        // Strategy 3: Fallback to first clickable item in search results
+        if (searchResultsNodes.isNotEmpty()) {
+            val firstResult = searchResultsNodes.first()
+            val text = firstResult.text?.toString()?.trim() ?: ""
+            val contentDesc = firstResult.contentDescription?.toString()?.trim() ?: ""
+            val displayText = if (text.isNotBlank()) text else contentDesc
+            android.util.Log.w("WireAuto", "No match found, using first result as fallback: '$displayText'")
+            debugLog("SEARCH", "No match found, using first result as fallback: '$displayText'")
+            return firstResult
+        }
+        
+        android.util.Log.w("WireAuto", "No search results found for: $searchName")
+        debugLog("SEARCH", "No search results found for: $searchName")
+        return null
+    }
+    
+    /**
+     * Helper: Find node by resource ID
+     */
+    private fun findNodeByResourceId(root: AccessibilityNodeInfo, resourceId: String): AccessibilityNodeInfo? {
+        val viewIdResourceName = root.viewIdResourceName
+        if (viewIdResourceName == resourceId) {
+            return root
+        }
+        
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i)
+            if (child != null) {
+                val found = findNodeByResourceId(child, resourceId)
+                if (found != null) return found
+            }
+        }
+        
         return null
     }
     
