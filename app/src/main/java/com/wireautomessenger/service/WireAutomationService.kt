@@ -430,6 +430,11 @@ class WireAutomationService : AccessibilityService() {
             debugLog("STATE", "Wire app is now in foreground - isWireOpened=true")
             android.util.Log.i("WireAuto", "Wire app is now in foreground - State: isWireOpened=true")
 
+            // Wait for UI to fully load before scanning
+            debugLog("ACTION", "Waiting 5 seconds for Wire UI to fully load...")
+            updateNotification("Waiting for Wire UI to load...")
+            delay(5000) // 5-second delay to ensure conversation list is fully loaded
+
             // STEP 3: Navigate to contacts and send messages
             isSendingInProgress.set(true)
             debugLog("STATE", "Starting message sending process - isSendingInProgress=true")
@@ -439,13 +444,29 @@ class WireAutomationService : AccessibilityService() {
             // Phase 0: Contact Discovery - Discover contacts from home screen first
             val discoveredContacts = discoverContactsFromHomeScreen()
             
+            // Force Discovery Success: If empty, STOP automation and log error
             if (discoveredContacts.isEmpty()) {
-                android.util.Log.e("WireAuto", "No contacts discovered from home screen")
-                debugLog("ERROR", "No contacts discovered - cannot proceed")
-                sendErrorBroadcast("No contacts found in Wire. Please ensure you have conversations.")
+                val errorMsg = "CRITICAL: No contacts discovered from home screen. Automation stopped to prevent random typing."
+                android.util.Log.e("WireAuto", errorMsg)
+                debugLog("ERROR", errorMsg)
+                updateNotification("No contacts found - Automation stopped")
+                
+                // Show Toast message
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(this, "❌ No contacts discovered! Automation stopped.", Toast.LENGTH_LONG).show()
+                }
+                
+                sendErrorBroadcast("No contacts found in Wire. Please ensure you have conversations. Automation stopped to prevent errors.")
                 resetState()
                 return
             }
+            
+            // Show Toast with discovered contacts count
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(this, "✓ Discovered ${discoveredContacts.size} contacts", Toast.LENGTH_LONG).show()
+            }
+            android.util.Log.i("WireAuto", "✓ Discovered ${discoveredContacts.size} contacts - showing toast")
+            debugLog("SUCCESS", "Discovered ${discoveredContacts.size} contacts - showing toast")
             
             // Human mimicry: Delay before starting search process
             debugLog("PHASE0", "Contact discovery complete. Human mimicry delay: 2-3 seconds")
@@ -4332,25 +4353,89 @@ class WireAutomationService : AccessibilityService() {
     
     /**
      * Extract contact names from TextView elements in the current view
+     * Improved: Looks for RecyclerView, all TextViews, and Title fields in parent layouts
      */
     private fun extractContactNamesFromView(root: AccessibilityNodeInfo): Set<String> {
         val contactNames = mutableSetOf<String>()
         val allTextViews = mutableListOf<AccessibilityNodeInfo>()
         
-        // Find all TextView elements
-        findAllNodesByClassName(root, "android.widget.TextView", allTextViews)
-        findAllNodesByClassName(root, "androidx.appcompat.widget.AppCompatTextView", allTextViews)
+        // Strategy 1: Find RecyclerView first (conversation list)
+        val recyclerView = findRecyclerView(root)
+        val searchRoot = recyclerView ?: root // Use RecyclerView if found, otherwise use root
+        
+        android.util.Log.d("WireAuto", "Extracting contacts - RecyclerView found: ${recyclerView != null}")
+        debugLog("EXTRACT", "RecyclerView found: ${recyclerView != null}, searching in ${if (recyclerView != null) "RecyclerView" else "root"}")
+        
+        // Strategy 2: Find ALL TextView elements (broad search)
+        findAllNodesByClassName(searchRoot, "android.widget.TextView", allTextViews)
+        findAllNodesByClassName(searchRoot, "androidx.appcompat.widget.AppCompatTextView", allTextViews)
+        findAllNodesByClassName(searchRoot, "android.widget.TextView", allTextViews) // Also search in root if RecyclerView was used
+        
+        // Strategy 3: Look for Title fields in parent layouts (LinearLayout, RelativeLayout, etc.)
+        val allViewGroups = mutableListOf<AccessibilityNodeInfo>()
+        findAllNodesByClassName(searchRoot, "android.widget.LinearLayout", allViewGroups)
+        findAllNodesByClassName(searchRoot, "android.widget.RelativeLayout", allViewGroups)
+        findAllNodesByClassName(searchRoot, "androidx.constraintlayout.widget.ConstraintLayout", allViewGroups)
+        findAllNodesByClassName(searchRoot, "android.widget.FrameLayout", allViewGroups)
+        
+        // Extract text from ViewGroups that might contain title fields
+        for (viewGroup in allViewGroups) {
+            // Look for children that might be title fields
+            for (i in 0 until viewGroup.childCount) {
+                val child = viewGroup.getChild(i)
+                if (child != null) {
+                    val childText = child.text?.toString()?.trim() ?: ""
+                    val childDesc = child.contentDescription?.toString()?.trim() ?: ""
+                    val className = child.className?.toString() ?: ""
+                    
+                    // Check if this looks like a title field (TextView in a layout)
+                    if (className.contains("TextView", ignoreCase = true) && 
+                        (childText.isNotBlank() || childDesc.isNotBlank())) {
+                        allTextViews.add(child)
+                    }
+                }
+            }
+        }
+        
+        android.util.Log.d("WireAuto", "Found ${allTextViews.size} TextView elements to analyze")
+        debugLog("EXTRACT", "Found ${allTextViews.size} TextView elements to analyze")
+        
+        // System buttons to exclude
+        val systemButtons = setOf(
+            "search", "conversations", "new", "add", "settings", "profile", 
+            "menu", "back", "close", "cancel", "ok", "done", "send",
+            "filter", "sort", "refresh", "sync", "edit", "delete"
+        )
         
         for (textView in allTextViews) {
             val text = textView.text?.toString()?.trim() ?: ""
             val contentDesc = textView.contentDescription?.toString()?.trim() ?: ""
+            val className = textView.className?.toString() ?: ""
+            val resourceId = textView.viewIdResourceName ?: ""
             
             // Skip empty text
             if (text.isEmpty() && contentDesc.isEmpty()) continue
             
-            // Skip common UI elements that are not contact names
+            // Skip if it's a Button or ImageButton (system buttons)
+            if (className.contains("Button", ignoreCase = true) && 
+                !className.contains("TextView", ignoreCase = true)) {
+                continue
+            }
+            
             val lowerText = text.lowercase()
             val lowerDesc = contentDesc.lowercase()
+            val lowerResourceId = resourceId.lowercase()
+            
+            // Skip system buttons and UI elements
+            val isSystemButton = systemButtons.any { button -> 
+                lowerText == button || lowerDesc == button || 
+                lowerText.contains(button) || lowerDesc.contains(button) ||
+                lowerResourceId.contains(button)
+            }
+            
+            if (isSystemButton) {
+                continue
+            }
             
             // Filter out guest contacts and common UI elements
             if (lowerText.contains("search") || 
@@ -4376,7 +4461,23 @@ class WireAutomationService : AccessibilityService() {
             var parent = textView.parent
             var isInContactRow = false
             var depth = 0
-            while (parent != null && depth < 5) {
+            var foundTitleField = false
+            
+            // Check parent layouts for title fields
+            while (parent != null && depth < 8) { // Increased depth to find parent layouts
+                val parentClassName = parent.className?.toString() ?: ""
+                
+                // Check if parent is a layout that might contain a title
+                if (parentClassName.contains("Layout", ignoreCase = true) || 
+                    parentClassName.contains("ViewGroup", ignoreCase = true)) {
+                    // Check if this looks like a title field in a layout
+                    if (text.length >= 2 && text.length <= 50 && 
+                        !text.contains(":") && // Not a message preview
+                        !text.matches(Regex("^\\d{1,2}:\\d{2}$"))) { // Not a time
+                        foundTitleField = true
+                    }
+                }
+                
                 if (parent.isClickable) {
                     isInContactRow = true
                     break
@@ -4385,13 +4486,20 @@ class WireAutomationService : AccessibilityService() {
                 depth++
             }
             
-            // If it's in a clickable row and has meaningful text, it's likely a contact name
-            if (isInContactRow && text.length >= 2 && text.length <= 100) {
+            // Accept if:
+            // 1. It's in a clickable row (contact row), OR
+            // 2. It's a title field in a layout, OR
+            // 3. It's in the RecyclerView (conversation list)
+            val isInRecyclerView = recyclerView != null && isNodeInHierarchy(textView, recyclerView)
+            
+            if ((isInContactRow || foundTitleField || isInRecyclerView) && 
+                text.length >= 2 && text.length <= 100) {
                 // Clean the name (remove common prefixes like "You: ", timestamps, etc.)
                 val cleanName = cleanContactName(text)
                 // Filter out guest contacts
                 if (cleanName.isNotBlank() && cleanName.length >= 2 && !cleanName.lowercase().contains("guest")) {
                     contactNames.add(cleanName)
+                    android.util.Log.v("WireAuto", "Added contact name: $cleanName (from ${if (isInContactRow) "clickable row" else if (foundTitleField) "title field" else "RecyclerView"})")
                 }
             }
             
@@ -4401,11 +4509,31 @@ class WireAutomationService : AccessibilityService() {
                 // Filter out guest contacts
                 if (cleanDesc.isNotBlank() && cleanDesc.length >= 2 && !cleanDesc.lowercase().contains("guest")) {
                     contactNames.add(cleanDesc)
+                    android.util.Log.v("WireAuto", "Added contact name from contentDesc: $cleanDesc")
                 }
             }
         }
         
+        android.util.Log.d("WireAuto", "Extracted ${contactNames.size} unique contact names")
+        debugLog("EXTRACT", "Extracted ${contactNames.size} unique contact names: ${contactNames.take(5).joinToString(", ")}")
+        
         return contactNames
+    }
+    
+    /**
+     * Helper: Check if a node is in the hierarchy of another node
+     */
+    private fun isNodeInHierarchy(node: AccessibilityNodeInfo, ancestor: AccessibilityNodeInfo): Boolean {
+        var current: AccessibilityNodeInfo? = node
+        var depth = 0
+        while (current != null && depth < 10) {
+            if (current == ancestor) {
+                return true
+            }
+            current = current.parent
+            depth++
+        }
+        return false
     }
     
     /**
