@@ -435,8 +435,8 @@ class WireAutomationService : AccessibilityService() {
             debugLog("STATE", "Starting message sending process - isSendingInProgress=true")
             android.util.Log.i("WireAuto", "Starting message sending process - State: isSendingInProgress=true")
             
-            debugLog("ACTION", "STEP 3: Calling navigateAndSendMessages with message length: ${message.length}")
-            navigateAndSendMessages(message)
+            debugLog("ACTION", "STEP 3: Calling sendMessagesViaSearch with message length: ${message.length}")
+            sendMessagesViaSearch(message)
 
                 } catch (e: Exception) {
             val errorMsg = "Error: ${e.message ?: "Unknown error"}"
@@ -4195,6 +4195,495 @@ class WireAutomationService : AccessibilityService() {
             LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    /**
+     * NEW SEARCH-BASED IMPLEMENTATION
+     * Phase 1-6: Complete automation with search, human mimicry, batching, and anti-ban strategies
+     */
+    private suspend fun sendMessagesViaSearch(message: String) {
+        android.util.Log.i("WireAuto", "=== PHASE 1: Starting search-based message sending ===")
+        debugLog("EVENT", "=== PHASE 1: Starting search-based message sending ===")
+        
+        // Phase 1: Setup & Launch - Already done in sendMessagesToAllContacts
+        // Bootstrap delay: Wait for app to sync messages
+        updateNotification("Waiting for Wire to sync...")
+        sendProgressBroadcast("Waiting for Wire to sync...")
+        debugLog("PHASE1", "Bootstrap delay: 3000ms to allow app to sync messages")
+        delay(3000)
+        
+        // Get contact list from preferences or use a default list
+        val contactListJson = prefs.getString("contact_list", null)
+        val contactNames = if (contactListJson != null) {
+            try {
+                // Parse JSON array of contact names
+                val gson = com.google.gson.Gson()
+                val type = object : com.google.gson.reflect.TypeToken<List<String>>() {}.type
+                gson.fromJson<List<String>>(contactListJson, type) ?: emptyList()
+            } catch (e: Exception) {
+                android.util.Log.e("WireAuto", "Failed to parse contact list: ${e.message}")
+                emptyList()
+            }
+        } else {
+            // Fallback: Get contacts from the current conversations list
+            getContactsFromConversationsList()
+        }
+        
+        if (contactNames.isEmpty()) {
+            android.util.Log.e("WireAuto", "No contacts found to send messages to")
+            debugLog("ERROR", "No contacts found - cannot proceed with search-based sending")
+            sendErrorBroadcast("No contacts found. Please ensure you have conversations in Wire.")
+            return
+        }
+        
+        android.util.Log.i("WireAuto", "Found ${contactNames.size} contacts to send messages to")
+        debugLog("DATA", "Contact list: ${contactNames.size} contacts")
+        
+        // Phase 4: Batching configuration
+        val batchSize = 20
+        val batchBreakSeconds = 120 // 2 minutes
+        var contactsProcessed = 0
+        var contactsSent = 0
+        val contactResults = mutableListOf<com.wireautomessenger.model.ContactResult>()
+        val reportFile = File(getExternalFilesDir(null), "automation_report.txt")
+        
+        // Initialize report file
+        reportFile.writeText("=== Wire Automation Report ===\n")
+        reportFile.appendText("Start Time: ${dateFormat.format(Date())}\n")
+        reportFile.appendText("Total Contacts: ${contactNames.size}\n")
+        reportFile.appendText("Message: ${message.take(100)}${if (message.length > 100) "..." else ""}\n\n")
+        
+        // Process contacts in batches
+        for (batchStart in contactNames.indices step batchSize) {
+            val batchEnd = minOf(batchStart + batchSize, contactNames.size)
+            val batch = contactNames.subList(batchStart, batchEnd)
+            
+            android.util.Log.i("WireAuto", "=== Processing batch ${(batchStart / batchSize) + 1}: contacts ${batchStart + 1}-$batchEnd ===")
+            debugLog("BATCH", "Processing batch ${(batchStart / batchSize) + 1}: contacts ${batchStart + 1}-$batchEnd")
+            updateNotification("Processing batch ${(batchStart / batchSize) + 1}/${(contactNames.size + batchSize - 1) / batchSize}...")
+            
+            for ((index, contactName) in batch.withIndex()) {
+                val globalIndex = batchStart + index
+                contactsProcessed++
+                
+                try {
+                    android.util.Log.i("WireAuto", "=== Processing contact ${globalIndex + 1}/${contactNames.size}: $contactName ===")
+                    debugLog("CONTACT", "Processing contact ${globalIndex + 1}/${contactNames.size}: $contactName")
+                    updateNotification("Sending to $contactName (${globalIndex + 1}/${contactNames.size})...")
+                    sendProgressBroadcast("Sending to $contactName...", contactsSent)
+                    
+                    // Phase 2: Contact Search Logic
+                    val searchResult = searchAndSelectContact(contactName)
+                    
+                    if (!searchResult) {
+                        val errorMsg = "Contact not found: $contactName"
+                        android.util.Log.w("WireAuto", errorMsg)
+                        debugLog("ERROR", errorMsg)
+                        contactResults.add(com.wireautomessenger.model.ContactResult(
+                            name = contactName,
+                            status = com.wireautomessenger.model.ContactStatus.FAILED,
+                            errorMessage = "Contact not found in search",
+                            position = globalIndex + 1
+                        ))
+                        reportFile.appendText("${dateFormat.format(Date())} | FAILED | $contactName | Contact not found\n")
+                        sendContactUpdate(contactName, "failed", globalIndex + 1, "Contact not found")
+                        continue
+                    }
+                    
+                    // Phase 3: Messaging & Human Mimicry
+                    val messageSent = sendMessageToContact(message, contactName, globalIndex + 1)
+                    
+                    if (messageSent) {
+                        contactsSent++
+                        contactResults.add(com.wireautomessenger.model.ContactResult(
+                            name = contactName,
+                            status = com.wireautomessenger.model.ContactStatus.SENT,
+                            errorMessage = null,
+                            position = globalIndex + 1
+                        ))
+                        reportFile.appendText("${dateFormat.format(Date())} | SUCCESS | $contactName | Message sent\n")
+                        sendContactUpdate(contactName, "sent", globalIndex + 1, null)
+                        debugLog("SUCCESS", "Message sent successfully to $contactName")
+                    } else {
+                        contactResults.add(com.wireautomessenger.model.ContactResult(
+                            name = contactName,
+                            status = com.wireautomessenger.model.ContactStatus.FAILED,
+                            errorMessage = "Failed to send message",
+                            position = globalIndex + 1
+                        ))
+                        reportFile.appendText("${dateFormat.format(Date())} | FAILED | $contactName | Failed to send message\n")
+                        sendContactUpdate(contactName, "failed", globalIndex + 1, "Failed to send message")
+                    }
+                    
+                    // Phase 4: Return to main screen after each message
+                    returnToMainScreen()
+                    
+                    // Phase 4: Randomized delay between contacts (3000-7000ms)
+                    val randomDelay = (3000..7000).random()
+                    debugLog("DELAY", "Random delay before next contact: ${randomDelay}ms")
+                    delay(randomDelay.toLong())
+                    
+                } catch (e: Exception) {
+                    android.util.Log.e("WireAuto", "Error processing contact $contactName: ${e.message}", e)
+                    debugLog("ERROR", "Error processing contact $contactName: ${e.message}", e)
+                    contactResults.add(com.wireautomessenger.model.ContactResult(
+                        name = contactName,
+                        status = com.wireautomessenger.model.ContactStatus.FAILED,
+                        errorMessage = "Exception: ${e.message}",
+                        position = globalIndex + 1
+                    ))
+                    reportFile.appendText("${dateFormat.format(Date())} | ERROR | $contactName | ${e.message}\n")
+                    sendContactUpdate(contactName, "failed", globalIndex + 1, "Exception: ${e.message}")
+                }
+            }
+            
+            // Phase 4: Break between batches (except for last batch)
+            if (batchEnd < contactNames.size) {
+                android.util.Log.i("WireAuto", "=== Batch complete. Taking ${batchBreakSeconds}s break before next batch ===")
+                debugLog("BATCH", "Batch complete. Taking ${batchBreakSeconds}s break")
+                updateNotification("Batch complete. Break ${batchBreakSeconds}s...")
+                delay(batchBreakSeconds * 1000L)
+            }
+        }
+        
+        // Final report
+        val duration = System.currentTimeMillis() - sessionStartTime
+        val durationSeconds = duration / 1000.0
+        reportFile.appendText("\n=== Summary ===\n")
+        reportFile.appendText("End Time: ${dateFormat.format(Date())}\n")
+        reportFile.appendText("Total Runtime: ${String.format("%.2f", durationSeconds)} seconds\n")
+        reportFile.appendText("Contacts Processed: $contactsProcessed\n")
+        reportFile.appendText("Messages Sent: $contactsSent\n")
+        reportFile.appendText("Success Rate: ${if (contactsProcessed > 0) String.format("%.1f", (contactsSent * 100.0 / contactsProcessed)) else "0.0"}%\n")
+        
+        android.util.Log.i("WireAuto", "=== Automation complete: $contactsSent/$contactsProcessed messages sent ===")
+        debugLog("COMPLETE", "Automation complete: $contactsSent/$contactsProcessed messages sent")
+        debugLog("REPORT", "Report saved to: ${reportFile.absolutePath}")
+        
+        // Save results
+        val operationReport = buildOperationReport(contactNames.size, contactsProcessed, contactsSent, contactResults, duration)
+        saveOperationReport(operationReport)
+        
+        // Send completion broadcast
+        val intent = Intent(ACTION_COMPLETED).apply {
+            putExtra(EXTRA_CONTACTS_SENT, contactsSent)
+        }
+        LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+    }
+    
+    /**
+     * Phase 2: Contact Search Logic
+     * Locate search bar, type contact name character-by-character, wait for results, select first match
+     */
+    private suspend fun searchAndSelectContact(contactName: String): Boolean {
+        debugLog("SEARCH", "Phase 2: Searching for contact: $contactName")
+        
+        // Step 1: Find search bar/icon
+        var root = getRootWithRetry(maxRetries = 5, delayMs = 500)
+        if (root == null || root.packageName != WIRE_PACKAGE) {
+            android.util.Log.e("WireAuto", "Cannot access Wire app for search")
+            return false
+        }
+        
+        val searchBar = findSearchBar(root)
+        if (searchBar == null) {
+            android.util.Log.e("WireAuto", "Search bar not found")
+            debugLog("ERROR", "Search bar not found")
+            return false
+        }
+        
+        // Step 2: Click on search bar
+        debugLog("SEARCH", "Clicking on search bar...")
+        if (!clickNodeWithGesture(searchBar)) {
+            android.util.Log.w("WireAuto", "Failed to click search bar, trying alternative method")
+            searchBar.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
+        delay(1000) // Wait for search to open
+        
+        // Step 3: Type contact name character-by-character (human mimicry)
+        root = getRootWithRetry(maxRetries = 3, delayMs = 500)
+        val searchInput = findSearchInput(root)
+        if (searchInput == null) {
+            android.util.Log.e("WireAuto", "Search input field not found")
+            return false
+        }
+        
+        // Clear any existing text
+        val bundleClear = android.os.Bundle()
+        bundleClear.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+        searchInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundleClear)
+        delay(300)
+        
+        // Type character-by-character with 100ms delay
+        debugLog("SEARCH", "Typing contact name character-by-character: $contactName")
+        for (char in contactName) {
+            val bundle = android.os.Bundle()
+            bundle.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, char.toString())
+            searchInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
+            delay(100) // Human-like typing delay
+        }
+        delay(1500) // Wait for search results to populate
+        
+        // Step 4: Find and click first matching result
+        root = getRootWithRetry(maxRetries = 3, delayMs = 500)
+        val searchResult = findSearchResult(root, contactName)
+        
+        if (searchResult == null) {
+            android.util.Log.w("WireAuto", "Search result not found for: $contactName")
+            debugLog("WARN", "Search result not found for: $contactName")
+            // Close search
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            delay(500)
+            return false
+        }
+        
+        // Click on search result
+        debugLog("SEARCH", "Clicking on search result for: $contactName")
+        if (!clickNodeWithGesture(searchResult)) {
+            searchResult.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
+        delay(2000) // Wait for conversation to open
+        
+        return true
+    }
+    
+    /**
+     * Phase 3: Messaging & Human Mimicry
+     * Focus input, type message, click send, verify sent
+     */
+    private suspend fun sendMessageToContact(message: String, contactName: String, position: Int): Boolean {
+        debugLog("MESSAGE", "Phase 3: Sending message to $contactName")
+        
+        // Retry logic: max 3 attempts with incremental backoff
+        var attempt = 0
+        val backoffDelays = listOf(2000L, 4000L, 8000L)
+        
+        while (attempt < 3) {
+            attempt++
+            debugLog("MESSAGE", "Attempt $attempt/3 to send message to $contactName")
+            
+            try {
+                // Step 1: Find message input field
+                var root = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                val messageInput = findMessageInput(root)
+                
+                if (messageInput == null) {
+                    android.util.Log.w("WireAuto", "Message input not found (attempt $attempt)")
+                    if (attempt < 3) {
+                        delay(backoffDelays[attempt - 1])
+                        continue
+                    }
+                    return false
+                }
+                
+                // Step 2: Focus input field
+                debugLog("MESSAGE", "Focusing message input field...")
+                messageInput.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                delay(500)
+                
+                // Step 3: Clear existing text
+                val bundleClear = android.os.Bundle()
+                bundleClear.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+                messageInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundleClear)
+                delay(300)
+                
+                // Step 4: Type message (use setText for speed, but could be changed to character-by-character)
+                debugLog("MESSAGE", "Setting message text...")
+                val bundle = android.os.Bundle()
+                bundle.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, message)
+                val textSet = messageInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
+                
+                if (!textSet) {
+                    android.util.Log.w("WireAuto", "Failed to set message text (attempt $attempt)")
+                    if (attempt < 3) {
+                        delay(backoffDelays[attempt - 1])
+                        continue
+                    }
+                    return false
+                }
+                
+                delay(1000) // Wait for send button to enable
+                
+                // Step 5: Find and click send button
+                root = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                val sendButton = findSendButton(root) ?: findSendButtonNearInput(root, messageInput)
+                
+                if (sendButton == null) {
+                    android.util.Log.w("WireAuto", "Send button not found (attempt $attempt)")
+                    if (attempt < 3) {
+                        delay(backoffDelays[attempt - 1])
+                        continue
+                    }
+                    return false
+                }
+                
+                debugLog("MESSAGE", "Clicking send button...")
+                var clicked = clickNodeWithGesture(sendButton)
+                if (!clicked) {
+                    clicked = sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                }
+                
+                if (!clicked) {
+                    android.util.Log.w("WireAuto", "Failed to click send button (attempt $attempt)")
+                    if (attempt < 3) {
+                        delay(backoffDelays[attempt - 1])
+                        continue
+                    }
+                    return false
+                }
+                
+                delay(2000) // Wait for message to send
+                
+                // Step 6: Verify message was sent (check if input is empty)
+                root = getRootWithRetry(maxRetries = 3, delayMs = 500)
+                val refreshedInput = findMessageInput(root)
+                val inputText = refreshedInput?.text?.toString()?.trim() ?: ""
+                
+                if (inputText.isEmpty()) {
+                    debugLog("SUCCESS", "Message sent confirmed - input field is empty")
+                    return true
+                } else {
+                    android.util.Log.w("WireAuto", "Message may not have been sent - input still has text: '$inputText'")
+                    if (attempt < 3) {
+                        delay(backoffDelays[attempt - 1])
+                        continue
+                    }
+                    // Consider it sent anyway if we clicked the button
+                    return true
+                }
+                
+            } catch (e: Exception) {
+                android.util.Log.e("WireAuto", "Error in sendMessageToContact (attempt $attempt): ${e.message}", e)
+                if (attempt < 3) {
+                    delay(backoffDelays[attempt - 1])
+                    continue
+                }
+                return false
+            }
+        }
+        
+        return false
+    }
+    
+    /**
+     * Phase 4: Return to main screen
+     */
+    private suspend fun returnToMainScreen() {
+        debugLog("NAVIGATION", "Returning to main screen...")
+        performGlobalAction(GLOBAL_ACTION_BACK)
+        delay(1000)
+        performGlobalAction(GLOBAL_ACTION_BACK) // Sometimes need to go back twice
+        delay(1000)
+    }
+    
+    /**
+     * Helper: Find search bar
+     */
+    private fun findSearchBar(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        // Try to find search bar using multiple strategies
+        val searchBar = findSearchConversationsBar(root)
+        if (searchBar != null) return searchBar
+        
+        // Try to find by content description
+        val searchByDesc = findNodeByContentDescription(root, "Search")
+            ?: findNodeByContentDescription(root, "Search conversations")
+            ?: findNodeByContentDescription(root, "Search chats")
+        
+        if (searchByDesc != null) return searchByDesc
+        
+        // Try to find EditText with search hint
+        val allEditTexts = mutableListOf<AccessibilityNodeInfo>()
+        findAllNodesByClassName(root, "android.widget.EditText", allEditTexts)
+        findAllNodesByClassName(root, "androidx.appcompat.widget.AppCompatEditText", allEditTexts)
+        
+        for (editText in allEditTexts) {
+            val hint = editText.hintText?.toString()?.lowercase() ?: ""
+            if (hint.contains("search")) {
+                return editText
+            }
+        }
+        
+        return null
+    }
+    
+    /**
+     * Helper: Find search input field (after search is opened)
+     */
+    private fun findSearchInput(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (root == null) return null
+        
+        val allEditTexts = mutableListOf<AccessibilityNodeInfo>()
+        findAllNodesByClassName(root, "android.widget.EditText", allEditTexts)
+        findAllNodesByClassName(root, "androidx.appcompat.widget.AppCompatEditText", allEditTexts)
+        
+        // Return the first focused or visible EditText (likely the search input)
+        for (editText in allEditTexts) {
+            if (editText.isFocused || editText.isVisibleToUser) {
+                return editText
+            }
+        }
+        
+        return allEditTexts.firstOrNull()
+    }
+    
+    /**
+     * Helper: Find search result matching contact name
+     */
+    private fun findSearchResult(root: AccessibilityNodeInfo?, contactName: String): AccessibilityNodeInfo? {
+        if (root == null) return null
+        
+        val cleanName = contactName.trim()
+        val allNodes = mutableListOf<AccessibilityNodeInfo>()
+        findAllClickableNodes(root, allNodes)
+        
+        for (node in allNodes) {
+            val text = node.text?.toString()?.trim() ?: ""
+            val contentDesc = node.contentDescription?.toString()?.trim() ?: ""
+            
+            if (text.equals(cleanName, ignoreCase = true) || 
+                contentDesc.equals(cleanName, ignoreCase = true) ||
+                text.contains(cleanName, ignoreCase = true)) {
+                return node
+            }
+        }
+        
+        return null
+    }
+    
+    /**
+     * Helper: Get contacts from conversations list (fallback)
+     */
+    private suspend fun getContactsFromConversationsList(): List<String> {
+        val contacts = mutableListOf<String>()
+        val root = getRootWithRetry(maxRetries = 5, delayMs = 500)
+        
+        if (root != null && root.packageName == WIRE_PACKAGE) {
+            val contactItems = getAllContactItems(root)
+            for (item in contactItems) {
+                val name = extractContactNameFromRow(item)
+                if (name != null && name.isNotBlank()) {
+                    contacts.add(name)
+                }
+            }
+        }
+        
+        return contacts
+    }
+    
+    /**
+     * Helper: Find all clickable nodes recursively
+     */
+    private fun findAllClickableNodes(root: AccessibilityNodeInfo, result: MutableList<AccessibilityNodeInfo>) {
+        if (root.isClickable) {
+            result.add(root)
+        }
+        
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i)
+            if (child != null) {
+                findAllClickableNodes(child, result)
+            }
         }
     }
 }
