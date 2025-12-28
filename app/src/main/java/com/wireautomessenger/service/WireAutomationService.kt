@@ -4371,6 +4371,11 @@ class WireAutomationService : AccessibilityService() {
             debugLog("EXTRACT", "Found ${allTextViews.size} TextViews in total")
             
             // Filter TextViews that look like contact names (not message previews, not UI text)
+            // Search bar is typically at top 0-400px, so we only scan below 400px
+            val searchBarBottom = 400 // Search bar area ends around 400px from top
+            val screenHeight = getScreenHeight()
+            val bottomButtonArea = screenHeight - 300 // Bottom 300px has "New" button
+            
             for (textView in allTextViews) {
                 val text = textView.text?.toString()?.trim() ?: ""
                 val bounds = android.graphics.Rect()
@@ -4380,48 +4385,68 @@ class WireAutomationService : AccessibilityService() {
                 if (text.length < 2) continue
                 
                 // Skip message previews
-                if (text.startsWith("You:", ignoreCase = true)) continue
+                if (text.startsWith("You:", ignoreCase = true)) {
+                    android.util.Log.d("EXTRACT", "✗ Skipped message preview: '$text'")
+                    continue
+                }
                 
                 // Skip UI text
                 val lowerText = text.lowercase()
-                if (lowerText in listOf("conversations", "search", "new", "you", "search conversations")) continue
+                if (lowerText in listOf("conversations", "search", "new", "you", "search conversations")) {
+                    android.util.Log.d("EXTRACT", "✗ Skipped UI text: '$text'")
+                    continue
+                }
                 
                 // Skip timestamps
-                if (text.matches(Regex("\\d{1,2}:\\d{2}.*"))) continue
+                if (text.matches(Regex("\\d{1,2}:\\d{2}.*"))) {
+                    android.util.Log.d("EXTRACT", "✗ Skipped timestamp: '$text'")
+                    continue
+                }
                 
-                // Skip very short names in top area (profile icons)
-                if (bounds.top < 200 && text.length <= 2) continue
+                // CRITICAL: Skip any 1-2 character names in top 400px area (profile icons like MS, MA)
+                if (bounds.top < searchBarBottom && text.length <= 2) {
+                    android.util.Log.d("EXTRACT", "✗ Skipped short name in top area: '$text' (top=${bounds.top})")
+                    debugLog("EXTRACT", "✗ Skipped short name in top area: '$text' (top=${bounds.top})")
+                    continue
+                }
                 
-                // Must be in reasonable position (below search, above bottom button)
-                val screenHeight = getScreenHeight()
-                if (bounds.top > 200 && bounds.bottom < screenHeight - 200) {
+                // MUST be below search bar (above 400px) and above bottom button
+                if (bounds.top > searchBarBottom && bounds.bottom < bottomButtonArea) {
                     contacts.add(text)
                     android.util.Log.d("EXTRACT", "✓ Added from TextView: '$text' (bounds: top=${bounds.top})")
                     debugLog("EXTRACT", "✓ Added from TextView: '$text' (bounds: top=${bounds.top})")
+                } else {
+                    android.util.Log.d("EXTRACT", "✗ Skipped out of bounds: '$text' (top=${bounds.top}, bottom=${bounds.bottom}, searchBarBottom=$searchBarBottom, bottomButtonArea=$bottomButtonArea)")
                 }
             }
         } else {
             // Extract contact name from each item
+            val searchBarBottom = 400 // Search bar area ends around 400px from top
+            val screenHeight = getScreenHeight()
+            val bottomButtonArea = screenHeight - 300 // Bottom 300px has "New" button
+            
             for (item in contactItems) {
                 val contactName = extractContactNameFromRow(item)
                 if (contactName != null && contactName.isNotBlank()) {
-                    // Additional filtering: Skip profile icon text (MS, MA, etc. if they're too short and in top area)
                     val bounds = android.graphics.Rect()
                     item.getBoundsInScreen(bounds)
                     
-                    // Skip if it's a very short name (1-2 chars) in the top area (likely profile icon)
-                    val isTopArea = bounds.top < 200
-                    val isVeryShort = contactName.length <= 2
-                    
-                    if (isTopArea && isVeryShort) {
-                        android.util.Log.d("EXTRACT", "✗ Skipped short name in top area: '$contactName'")
-                        debugLog("EXTRACT", "✗ Skipped short name in top area: '$contactName'")
+                    // CRITICAL: Skip any 1-2 character names in top 400px area (profile icons like MS, MA)
+                    if (bounds.top < searchBarBottom && contactName.length <= 2) {
+                        android.util.Log.d("EXTRACT", "✗ Skipped short name in top area: '$contactName' (top=${bounds.top})")
+                        debugLog("EXTRACT", "✗ Skipped short name in top area: '$contactName' (top=${bounds.top})")
                         continue
                     }
                     
-                    contacts.add(contactName)
-                    android.util.Log.d("EXTRACT", "✓ Added: '$contactName'")
-                    debugLog("EXTRACT", "✓ Added: '$contactName'")
+                    // MUST be below search bar (above 400px) and above bottom button
+                    if (bounds.top > searchBarBottom && bounds.bottom < bottomButtonArea) {
+                        contacts.add(contactName)
+                        android.util.Log.d("EXTRACT", "✓ Added: '$contactName' (bounds: top=${bounds.top})")
+                        debugLog("EXTRACT", "✓ Added: '$contactName' (bounds: top=${bounds.top})")
+                    } else {
+                        android.util.Log.d("EXTRACT", "✗ Skipped out of bounds: '$contactName' (top=${bounds.top}, bottom=${bounds.bottom})")
+                        debugLog("EXTRACT", "✗ Skipped out of bounds: '$contactName' (top=${bounds.top})")
+                    }
                 }
             }
         }
