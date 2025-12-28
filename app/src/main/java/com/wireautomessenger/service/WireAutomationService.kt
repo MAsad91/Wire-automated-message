@@ -5289,21 +5289,45 @@ class WireAutomationService : AccessibilityService() {
         android.util.Log.d("SEARCH_MATCH", "Valid results: ${validResults.size}")
         debugLog("SEARCH_MATCH", "Valid results: ${validResults.size}")
         
-        // Try exact match
+        // Normalize function: remove dots and special chars for comparison
+        fun normalizeForMatch(text: String): String {
+            return text.lowercase()
+                .replace(".", "")
+                .replace("-", "")
+                .replace("'", "")
+                .replace(" ", "")
+                .trim()
+        }
+        
+        val normalizedQuery = normalizeForMatch(sanitizedQuery)
+        
+        // Try exact match (with normalization)
         for ((node, contactName) in validResults) {
-            if (contactName.lowercase() == sanitizedQuery) {
+            val normalizedName = normalizeForMatch(contactName)
+            if (normalizedName == normalizedQuery) {
                 android.util.Log.d("SEARCH_MATCH", "✓ Exact match: $contactName")
                 debugLog("SEARCH_MATCH", "✓ Exact match: $contactName")
                 return node
             }
         }
         
-        // Try partial match (both directions)
+        // Try partial match (both directions, with normalization)
         for ((node, contactName) in validResults) {
-            val lowerName = contactName.lowercase()
-            if (lowerName.contains(sanitizedQuery) || sanitizedQuery.contains(lowerName)) {
-                android.util.Log.d("SEARCH_MATCH", "✓ Partial match: $contactName")
+            val normalizedName = normalizeForMatch(contactName)
+            if (normalizedName.contains(normalizedQuery) || normalizedQuery.contains(normalizedName)) {
+                android.util.Log.d("SEARCH_MATCH", "✓ Partial match: $contactName (normalized: $normalizedName vs $normalizedQuery)")
                 debugLog("SEARCH_MATCH", "✓ Partial match: $contactName")
+                return node
+            }
+        }
+        
+        // Try fuzzy match: check if normalized strings are similar (for cases like "MAsad" vs "M.Asad")
+        for ((node, contactName) in validResults) {
+            val normalizedName = normalizeForMatch(contactName)
+            // Check if one starts with the other or vice versa
+            if (normalizedName.startsWith(normalizedQuery) || normalizedQuery.startsWith(normalizedName)) {
+                android.util.Log.d("SEARCH_MATCH", "✓ Fuzzy match: $contactName (normalized: $normalizedName starts with $normalizedQuery or vice versa)")
+                debugLog("SEARCH_MATCH", "✓ Fuzzy match: $contactName")
                 return node
             }
         }
