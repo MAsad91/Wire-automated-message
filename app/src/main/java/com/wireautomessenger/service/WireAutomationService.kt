@@ -3687,96 +3687,80 @@ class WireAutomationService : AccessibilityService() {
         return null
     }
     
-    private fun extractContactNameFromRow(rowItem: AccessibilityNodeInfo): String? {
-        // Extract contact name from a row item
-        // Filter out tags ("Guest"), message previews ("You: ..."), and UI elements
-        val textNodes = mutableListOf<Triple<String, Int, Int>>() // text, depth, textLength
-        
-        fun collectTextNodes(node: AccessibilityNodeInfo, depth: Int) {
-            val text = node.text?.toString()?.trim()
-            val contentDesc = node.contentDescription?.toString()?.trim()
-            val className = node.className?.toString() ?: ""
-            
-            // Skip buttons, input fields, and other UI elements
-            val isUIElement = className.contains("Button", ignoreCase = true) ||
-                             className.contains("EditText", ignoreCase = true) ||
-                             className.contains("ImageButton", ignoreCase = true)
-            
-            if (isUIElement) {
-                // Skip UI elements
-            } else {
-                if (!text.isNullOrEmpty() && text.length >= 2) {
-                    // Filter out common tags and message previews
-                    val lowerText = text.lowercase()
-                    val isTag = lowerText == "guest" || lowerText.contains("tag") || 
-                               (text.length <= 6 && text.all { it.isLetter() && it.isUpperCase() })
-                    // More strict message preview detection
-                    val isMessagePreview = text.startsWith("You:") || 
-                                          text.startsWith("you:") ||
-                                          text.startsWith("W.Salam") || // Example from user's log
-                                          text.contains(":") && text.length > 15 || // Contains colon and is long (likely message)
-                                          (text.length > 25 && !text.contains(" ")) // Very long single word
-                    val isCommonUI = lowerText in listOf("search", "conversations", "new", "filter", "sort", "contact")
-                    
-                    if (!isTag && !isMessagePreview && !isCommonUI) {
-                        textNodes.add(Triple(text, depth, text.length))
-                    }
-                }
-                if (!contentDesc.isNullOrEmpty() && contentDesc.length >= 2) {
-                    val lowerDesc = contentDesc.lowercase()
-                    val isTag = lowerDesc == "guest" || lowerDesc.contains("tag")
-                    val isMessagePreview = contentDesc.startsWith("You:") || 
-                                          contentDesc.startsWith("you:") ||
-                                          contentDesc.contains(":") && contentDesc.length > 15
-                    val isCommonUI = lowerDesc in listOf("search", "conversations", "new", "filter", "sort", "contact")
-                    
-                    if (!isTag && !isMessagePreview && !isCommonUI) {
-                        textNodes.add(Triple(contentDesc, depth, contentDesc.length))
-                    }
-                }
-            }
-            
-            for (i in 0 until node.childCount) {
-                val child = node.getChild(i)
-                if (child != null) {
-                    collectTextNodes(child, depth + 1)
-                }
-            }
+    private fun extractContactNameFromRow(rowNode: AccessibilityNodeInfo): String? {
+        // Get all TextViews in this row
+        val textViews = getAllChildNodes(rowNode).filter { 
+            it.className?.contains("TextView") == true 
         }
         
-        collectTextNodes(rowItem, 0)
+        android.util.Log.d("EXTRACT_ROW", "Found ${textViews.size} TextViews in row")
+        debugLog("EXTRACT_ROW", "Found ${textViews.size} TextViews in row")
         
-        // Find the best contact name:
-        // 1. Prefer names at shallow depth (usually the main contact name)
-        // 2. Prefer names with reasonable length (3-40 characters)
-        // 3. Exclude message previews more strictly
-        val candidateNames = textNodes.filter { (text, _, length) ->
-            // Filter out message previews more strictly
-            val isMessagePreview = text.contains(":") && text.length > 15 ||
-                                  text.startsWith("You:", ignoreCase = true) ||
-                                  text.startsWith("W.Salam") ||
-                                  (length > 25 && text.split(" ").size == 1) // Very long single word
-            length in 3..40 && !isMessagePreview && text.split(" ").size >= 1
-        }
+        var contactName = ""
+        var largestTextSize = 0f
         
-        // Sort by depth (shallower first), then by length (prefer shorter names - contact names are usually shorter than messages)
-        val sortedNames = candidateNames.sortedWith(compareBy<Triple<String, Int, Int>> { it.second }
-            .thenBy { it.third }) // Prefer shorter names (contact names vs message previews)
+        // The contact name is usually the TextView with:
+        // 1. Larger text size (bigger than message preview)
+        // 2. Does NOT start with "You:"
+        // 3. Is NOT a timestamp
+        // 4. Has reasonable length (2+ characters)
         
-        val selectedName = sortedNames.firstOrNull()?.first
-        
-        // Final validation: ensure it's not a message preview
-        if (selectedName != null) {
-            val isMessagePreview = selectedName.contains(":") && selectedName.length > 15 ||
-                                  selectedName.startsWith("You:", ignoreCase = true) ||
-                                  selectedName.startsWith("W.Salam")
-            if (isMessagePreview) {
-                // Try next candidate
-                return sortedNames.getOrNull(1)?.first
+        for (textView in textViews) {
+            val text = textView.text?.toString()?.trim() ?: ""
+            
+            android.util.Log.d("EXTRACT_ROW", "  TextView text: '$text'")
+            debugLog("EXTRACT_ROW", "  TextView text: '$text'")
+            
+            // Skip if empty or too short
+            if (text.length < 2) continue
+            
+            // Skip if it's a message preview
+            if (text.startsWith("You:")) {
+                android.util.Log.d("EXTRACT_ROW", "  ✗ Skipped: Message preview")
+                debugLog("EXTRACT_ROW", "  ✗ Skipped: Message preview")
+                continue
+            }
+            
+            // Skip if it's a timestamp pattern
+            if (text.matches(Regex("\\d{1,2}:\\d{2}.*")) || 
+                text.matches(Regex(".*\\d{1,2}:\\d{2}.*pm.*", RegexOption.IGNORE_CASE))) {
+                android.util.Log.d("EXTRACT_ROW", "  ✗ Skipped: Timestamp")
+                debugLog("EXTRACT_ROW", "  ✗ Skipped: Timestamp")
+                continue
+            }
+            
+            // Skip common UI text
+            if (text.lowercase() in listOf("conversations", "search", "new", "you")) {
+                android.util.Log.d("EXTRACT_ROW", "  ✗ Skipped: UI text")
+                debugLog("EXTRACT_ROW", "  ✗ Skipped: UI text")
+                continue
+            }
+            
+            // Get bounds to determine text size (larger bounds = larger text)
+            val bounds = android.graphics.Rect()
+            textView.getBoundsInScreen(bounds)
+            val textHeight = bounds.height()
+            
+            // Contact name usually has larger text
+            if (textHeight > largestTextSize) {
+                largestTextSize = textHeight.toFloat()
+                contactName = text
+                android.util.Log.d("EXTRACT_ROW", "  ✓ Potential contact name: '$text' (height: $textHeight)")
+                debugLog("EXTRACT_ROW", "  ✓ Potential contact name: '$text' (height: $textHeight)")
             }
         }
         
-        return selectedName
+        // Additional validation: Contact name should not contain "You:"
+        if (contactName.contains("You:", ignoreCase = true)) {
+            android.util.Log.d("EXTRACT_ROW", "Final validation failed - contains 'You:'")
+            debugLog("EXTRACT_ROW", "Final validation failed - contains 'You:'")
+            return null
+        }
+        
+        android.util.Log.d("EXTRACT_ROW", "Final extracted name: '$contactName'")
+        debugLog("EXTRACT_ROW", "Final extracted name: '$contactName'")
+        
+        return if (contactName.isNotBlank()) contactName else null
     }
     
     private fun findClickableContainer(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -4551,6 +4535,53 @@ class WireAutomationService : AccessibilityService() {
     }
     
     /**
+     * Extract contacts from conversations list using ViewGroup-based approach (Method 1)
+     * This is the main extraction function that finds conversation rows and extracts contact names
+     */
+    private fun extractContactsFromConversationsList(rootNode: AccessibilityNodeInfo): Set<String> {
+        val contacts = mutableSetOf<String>()
+        
+        android.util.Log.d("EXTRACT", "=== Starting Contact Extraction ===")
+        debugLog("EXTRACT", "=== Starting Contact Extraction ===")
+        
+        // Find all clickable conversation rows
+        val allNodes = getAllChildNodes(rootNode)
+        
+        // Each conversation is a clickable ViewGroup with specific characteristics
+        val conversationRows = allNodes.filter { node ->
+            val isClickable = node.isClickable
+            val hasChildren = node.childCount >= 2 // Has profile pic + texts
+            val isViewGroup = node.className?.contains("ViewGroup") == true
+            
+            // Check vertical position - must be below search bar
+            val bounds = android.graphics.Rect()
+            node.getBoundsInScreen(bounds)
+            val isBelowSearch = bounds.top > 300 // Search bar is ~0-300px from top
+            val isAboveBottom = bounds.bottom < getScreenHeight() - 300 // Above bottom button
+            
+            isClickable && hasChildren && isViewGroup && isBelowSearch && isAboveBottom
+        }
+        
+        android.util.Log.d("EXTRACT", "Found ${conversationRows.size} potential conversation rows")
+        debugLog("EXTRACT", "Found ${conversationRows.size} potential conversation rows")
+        
+        // Extract contact name from each row
+        for (row in conversationRows) {
+            val contactName = extractContactNameFromRow(row)
+            if (contactName != null && contactName.isNotBlank()) {
+                contacts.add(contactName)
+                android.util.Log.d("EXTRACT", "✓ Extracted contact: '$contactName'")
+                debugLog("EXTRACT", "✓ Extracted contact: '$contactName'")
+            }
+        }
+        
+        android.util.Log.d("EXTRACT", "=== Extraction Complete: ${contacts.size} contacts found ===")
+        debugLog("EXTRACT", "=== Extraction Complete: ${contacts.size} contacts found ===")
+        
+        return contacts
+    }
+    
+    /**
      * Helper: Check if a node is in the hierarchy of another node
      */
     private fun isNodeInHierarchy(node: AccessibilityNodeInfo, ancestor: AccessibilityNodeInfo): Boolean {
@@ -4953,60 +4984,11 @@ class WireAutomationService : AccessibilityService() {
         android.util.Log.d("WireAuto", "Found ${searchResultsNodes.size} potential search result nodes")
         debugLog("SEARCH", "Found ${searchResultsNodes.size} potential search result nodes")
         
-        // Strategy 1: Try exact match (case-insensitive)
-        for (node in searchResultsNodes) {
-            val text = node.text?.toString()?.trim() ?: ""
-            val contentDesc = node.contentDescription?.toString()?.trim() ?: ""
-            
-            // Check both text and contentDescription
-            val nodeTextLower = text.lowercase()
-            val nodeDescLower = contentDesc.lowercase()
-            
-            // Exact match check
-            if (nodeTextLower == cleanSearchName || nodeDescLower == cleanSearchName) {
-                android.util.Log.d("WireAuto", "Found exact match: '$text' == '$searchName'")
-                debugLog("SEARCH", "Found exact match: '$text' == '$searchName'")
-                return node
-            }
-        }
+        // Use the new findMatchingSearchResult function which has better extraction logic
+        val matchedResult = findMatchingSearchResult(cleanSearchName, searchResultsNodes)
         
-        // Strategy 2: Flexible matching - check if text or contentDescription starts with search term
-        for (node in searchResultsNodes) {
-            val text = node.text?.toString()?.trim() ?: ""
-            val contentDesc = node.contentDescription?.toString()?.trim() ?: ""
-            
-            val nodeTextLower = text.lowercase()
-            val nodeDescLower = contentDesc.lowercase()
-            
-            // Check if text or contentDescription starts with search name
-            if (nodeTextLower.startsWith(cleanSearchName) || nodeDescLower.startsWith(cleanSearchName)) {
-                // Allow variations like "MS (Online)" or "Muhammad Saleem" if it starts with "MS"
-                val displayText = if (text.isNotBlank()) text else contentDesc
-                android.util.Log.d("WireAuto", "Found flexible match: '$displayText' starts with '$searchName'")
-                debugLog("SEARCH", "Found flexible match: '$displayText' starts with '$searchName'")
-                return node
-            }
-            
-            // Also check if search name is contained in the text (for cases like "Muhammad Saleem" matching "MS")
-            // But only if the search name is short (2-3 chars) to avoid false matches
-            if (cleanSearchName.length <= 3 && 
-                (nodeTextLower.contains(cleanSearchName) || nodeDescLower.contains(cleanSearchName))) {
-                val displayText = if (text.isNotBlank()) text else contentDesc
-                android.util.Log.d("WireAuto", "Found partial match: '$displayText' contains '$searchName'")
-                debugLog("SEARCH", "Found partial match: '$displayText' contains '$searchName'")
-                return node
-            }
-        }
-        
-        // Strategy 3: Fallback to first clickable item in search results
-        if (searchResultsNodes.isNotEmpty()) {
-            val firstResult = searchResultsNodes.first()
-            val text = firstResult.text?.toString()?.trim() ?: ""
-            val contentDesc = firstResult.contentDescription?.toString()?.trim() ?: ""
-            val displayText = if (text.isNotBlank()) text else contentDesc
-            android.util.Log.w("WireAuto", "No match found, using first result as fallback: '$displayText'")
-            debugLog("SEARCH", "No match found, using first result as fallback: '$displayText'")
-            return firstResult
+        if (matchedResult != null) {
+            return matchedResult
         }
         
         android.util.Log.w("WireAuto", "No search results found for: $searchName")
@@ -5249,7 +5231,103 @@ class WireAutomationService : AccessibilityService() {
     }
     
     /**
-     * Helper: Find search result matching contact name
+     * Extract contact name from search result node
+     */
+    private fun extractContactFromSearchResult(node: AccessibilityNodeInfo): String {
+        val allViews = getAllChildNodes(node)
+        
+        // In search results, contact name is in a TextView
+        // It's usually the first/largest TextView that's not "Search" or empty
+        
+        var contactName = ""
+        var largestSize = 0
+        
+        for (view in allViews) {
+            if (view.className?.contains("TextView") == true) {
+                val text = view.text?.toString()?.trim() ?: ""
+                
+                // Skip empty or system text
+                if (text.isBlank() || 
+                    text.lowercase() in listOf("search", "search conversations")) {
+                    continue
+                }
+                
+                // Get text size by bounds
+                val bounds = android.graphics.Rect()
+                view.getBoundsInScreen(bounds)
+                val size = bounds.width() * bounds.height()
+                
+                if (size > largestSize) {
+                    largestSize = size
+                    contactName = text
+                }
+            }
+        }
+        
+        android.util.Log.d("SEARCH_EXTRACT", "Extracted from search result: '$contactName'")
+        debugLog("SEARCH_EXTRACT", "Extracted from search result: '$contactName'")
+        
+        return contactName
+    }
+    
+    /**
+     * Find matching search result for a contact name
+     */
+    private fun findMatchingSearchResult(
+        searchQuery: String, 
+        searchResults: List<AccessibilityNodeInfo>
+    ): AccessibilityNodeInfo? {
+        
+        val sanitizedQuery = searchQuery.trim().lowercase()
+        
+        android.util.Log.d("SEARCH_MATCH", "=== Matching '$sanitizedQuery' ===")
+        debugLog("SEARCH_MATCH", "=== Matching '$sanitizedQuery' ===")
+        
+        // Log all found results
+        searchResults.forEachIndexed { index, result ->
+            val name = extractContactFromSearchResult(result)
+            android.util.Log.d("SEARCH_MATCH", "Result $index: '$name'")
+            debugLog("SEARCH_MATCH", "Result $index: '$name'")
+        }
+        
+        // Try exact match first
+        for (result in searchResults) {
+            val contactName = extractContactFromSearchResult(result).lowercase()
+            if (contactName == sanitizedQuery) {
+                android.util.Log.d("SEARCH_MATCH", "✓ Exact match found: $contactName")
+                debugLog("SEARCH_MATCH", "✓ Exact match found: $contactName")
+                return result
+            }
+        }
+        
+        // Try partial match
+        for (result in searchResults) {
+            val contactName = extractContactFromSearchResult(result).lowercase()
+            if (contactName.contains(sanitizedQuery) || sanitizedQuery.contains(contactName)) {
+                android.util.Log.d("SEARCH_MATCH", "✓ Partial match found: $contactName")
+                debugLog("SEARCH_MATCH", "✓ Partial match found: $contactName")
+                return result
+            }
+        }
+        
+        // Use first result ONLY if it has valid text
+        val firstResult = searchResults.firstOrNull()
+        if (firstResult != null) {
+            val name = extractContactFromSearchResult(firstResult)
+            if (name.isNotBlank()) {
+                android.util.Log.d("SEARCH_MATCH", "✓ Using fallback: $name")
+                debugLog("SEARCH_MATCH", "✓ Using fallback: $name")
+                return firstResult
+            }
+        }
+        
+        android.util.Log.e("SEARCH_MATCH", "✗ No valid match found")
+        debugLog("SEARCH_MATCH", "✗ No valid match found")
+        return null
+    }
+    
+    /**
+     * Helper: Find search result matching contact name (backward compatibility)
      */
     private fun findSearchResult(root: AccessibilityNodeInfo?, contactName: String): AccessibilityNodeInfo? {
         if (root == null) return null
@@ -5258,18 +5336,14 @@ class WireAutomationService : AccessibilityService() {
         val allNodes = mutableListOf<AccessibilityNodeInfo>()
         findAllClickableNodesRecursive(root, allNodes)
         
-        for (node in allNodes) {
+        // Filter to get search results (clickable nodes with text)
+        val searchResults = allNodes.filter { node ->
             val text = node.text?.toString()?.trim() ?: ""
             val contentDesc = node.contentDescription?.toString()?.trim() ?: ""
-            
-            if (text.equals(cleanName, ignoreCase = true) || 
-                contentDesc.equals(cleanName, ignoreCase = true) ||
-                text.contains(cleanName, ignoreCase = true)) {
-                return node
-            }
+            node.isClickable && (text.isNotBlank() || contentDesc.isNotBlank())
         }
         
-        return null
+        return findMatchingSearchResult(cleanName, searchResults)
     }
     
     /**
@@ -5290,6 +5364,30 @@ class WireAutomationService : AccessibilityService() {
         }
         
         return contacts
+    }
+    
+    /**
+     * Helper: Get all nested child nodes recursively
+     */
+    private fun getAllChildNodes(node: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
+        val allNodes = mutableListOf<AccessibilityNodeInfo>()
+        
+        fun traverse(current: AccessibilityNodeInfo) {
+            allNodes.add(current)
+            for (i in 0 until current.childCount) {
+                current.getChild(i)?.let { traverse(it) }
+            }
+        }
+        
+        traverse(node)
+        return allNodes
+    }
+    
+    /**
+     * Helper: Get screen height
+     */
+    private fun getScreenHeight(): Int {
+        return resources.displayMetrics.heightPixels
     }
     
 }
