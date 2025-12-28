@@ -4345,35 +4345,84 @@ class WireAutomationService : AccessibilityService() {
         android.util.Log.d("EXTRACT", "=== NEW EXTRACTION: Starting Contact Discovery ===")
         debugLog("EXTRACT", "=== NEW EXTRACTION: Starting Contact Discovery ===")
         
-        // Get screen dimensions
-        val screenHeight = getScreenHeight()
-        val topBarLimit = 300 // Top 300px is menu/search/profile
-        val bottomLimit = screenHeight - 300 // Bottom 300px is "New" button
+        // Log root node info for debugging
+        android.util.Log.d("EXTRACT", "Root node: package=${rootNode.packageName}, className=${rootNode.className}, childCount=${rootNode.childCount}")
+        debugLog("EXTRACT", "Root node: package=${rootNode.packageName}, className=${rootNode.className}, childCount=${rootNode.childCount}")
         
-        // Find all clickable ViewGroups (conversation rows)
-        val allNodes = getAllChildNodes(rootNode)
-        val conversationRows = allNodes.filter { node ->
-            val bounds = android.graphics.Rect()
-            node.getBoundsInScreen(bounds)
+        // Use the existing getAllContactItems function which has proven logic
+        val contactItems = getAllContactItems(rootNode)
+        
+        android.util.Log.d("EXTRACT", "Found ${contactItems.size} contact items from getAllContactItems")
+        debugLog("EXTRACT", "Found ${contactItems.size} contact items from getAllContactItems")
+        
+        // If getAllContactItems returns empty, try alternative approach: find all TextViews with names
+        if (contactItems.isEmpty()) {
+            android.util.Log.w("EXTRACT", "getAllContactItems returned empty, trying alternative extraction...")
+            debugLog("EXTRACT", "getAllContactItems returned empty, trying alternative extraction...")
             
-            // Must be clickable conversation item
-            node.isClickable &&
-            node.childCount >= 2 && // Has profile pic + text
-            bounds.top > topBarLimit && // Below search bar
-            bounds.bottom < bottomLimit && // Above bottom button
-            node.className?.contains("ViewGroup") == true
-        }
-        
-        android.util.Log.d("EXTRACT", "Found ${conversationRows.size} conversation rows")
-        debugLog("EXTRACT", "Found ${conversationRows.size} conversation rows")
-        
-        // Extract contact name from each row
-        for (row in conversationRows) {
-            val contactName = extractContactNameFromRow(row)
-            if (contactName != null && contactName.isNotBlank()) {
-                contacts.add(contactName)
-                android.util.Log.d("EXTRACT", "✓ Added: '$contactName'")
-                debugLog("EXTRACT", "✓ Added: '$contactName'")
+            // Alternative: Find all TextViews that look like contact names
+            val allTextViews = getAllChildNodes(rootNode).filter { 
+                it.className?.contains("TextView") == true && 
+                it.text != null && 
+                it.text.toString().trim().isNotBlank()
+            }
+            
+            android.util.Log.d("EXTRACT", "Found ${allTextViews.size} TextViews in total")
+            debugLog("EXTRACT", "Found ${allTextViews.size} TextViews in total")
+            
+            // Filter TextViews that look like contact names (not message previews, not UI text)
+            for (textView in allTextViews) {
+                val text = textView.text?.toString()?.trim() ?: ""
+                val bounds = android.graphics.Rect()
+                textView.getBoundsInScreen(bounds)
+                
+                // Skip if empty or too short
+                if (text.length < 2) continue
+                
+                // Skip message previews
+                if (text.startsWith("You:", ignoreCase = true)) continue
+                
+                // Skip UI text
+                val lowerText = text.lowercase()
+                if (lowerText in listOf("conversations", "search", "new", "you", "search conversations")) continue
+                
+                // Skip timestamps
+                if (text.matches(Regex("\\d{1,2}:\\d{2}.*"))) continue
+                
+                // Skip very short names in top area (profile icons)
+                if (bounds.top < 200 && text.length <= 2) continue
+                
+                // Must be in reasonable position (below search, above bottom button)
+                val screenHeight = getScreenHeight()
+                if (bounds.top > 200 && bounds.bottom < screenHeight - 200) {
+                    contacts.add(text)
+                    android.util.Log.d("EXTRACT", "✓ Added from TextView: '$text' (bounds: top=${bounds.top})")
+                    debugLog("EXTRACT", "✓ Added from TextView: '$text' (bounds: top=${bounds.top})")
+                }
+            }
+        } else {
+            // Extract contact name from each item
+            for (item in contactItems) {
+                val contactName = extractContactNameFromRow(item)
+                if (contactName != null && contactName.isNotBlank()) {
+                    // Additional filtering: Skip profile icon text (MS, MA, etc. if they're too short and in top area)
+                    val bounds = android.graphics.Rect()
+                    item.getBoundsInScreen(bounds)
+                    
+                    // Skip if it's a very short name (1-2 chars) in the top area (likely profile icon)
+                    val isTopArea = bounds.top < 200
+                    val isVeryShort = contactName.length <= 2
+                    
+                    if (isTopArea && isVeryShort) {
+                        android.util.Log.d("EXTRACT", "✗ Skipped short name in top area: '$contactName'")
+                        debugLog("EXTRACT", "✗ Skipped short name in top area: '$contactName'")
+                        continue
+                    }
+                    
+                    contacts.add(contactName)
+                    android.util.Log.d("EXTRACT", "✓ Added: '$contactName'")
+                    debugLog("EXTRACT", "✓ Added: '$contactName'")
+                }
             }
         }
         
