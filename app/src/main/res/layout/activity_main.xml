@@ -363,12 +363,6 @@
 
             </LinearLayout>
 
-            <!-- Debug Actions -->
-            <LinearLayout
-                android:id="@+id/llDebugActions"
-                android:layout_width="match_parent"
-
-        </LinearLayout>
     </androidx.core.widget.NestedScrollView>
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
