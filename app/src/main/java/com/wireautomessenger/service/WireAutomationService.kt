@@ -4326,36 +4326,11 @@ class WireAutomationService : AccessibilityService() {
             !lowerName.contains("guest") && contactName.isNotBlank()
         }
         
-        // Remove duplicates by normalizing names (case-insensitive, remove dots/spaces for comparison)
-        val uniqueContacts = mutableSetOf<String>()
-        val normalizedNames = mutableSetOf<String>()
+        val contactList = ArrayList(filteredContacts.sorted())
         
-        for (contact in filteredContacts) {
-            val normalized = contact.trim().lowercase()
-                .replace(".", "")
-                .replace("-", "")
-                .replace("'", "")
-                .replace(" ", "")
-            
-            if (!normalizedNames.contains(normalized)) {
-                normalizedNames.add(normalized)
-                uniqueContacts.add(contact)
-            } else {
-                android.util.Log.d("PHASE0", "Skipping duplicate contact: '$contact' (normalized: '$normalized')")
-                debugLog("PHASE0", "Skipping duplicate contact: '$contact'")
-            }
-        }
-        
-        val contactList = ArrayList(uniqueContacts.sorted())
-        
-        android.util.Log.i("WireAuto", "=== Contact discovery complete: Found ${contactList.size} unique contacts (after filtering guests and duplicates) ===")
-        debugLog("PHASE0", "Contact discovery complete: Found ${contactList.size} unique contacts (after filtering guests and duplicates)")
-        debugLog("PHASE0", "Discovered contacts: ${contactList.joinToString(", ")}")
-        
-        // Log each contact for debugging
-        contactList.forEachIndexed { index, contact ->
-            android.util.Log.d("PHASE0", "Contact ${index + 1}: '$contact'")
-        }
+        android.util.Log.i("WireAuto", "=== Contact discovery complete: Found ${contactList.size} unique contacts (after filtering guests) ===")
+        debugLog("PHASE0", "Contact discovery complete: Found ${contactList.size} unique contacts (after filtering guests)")
+        debugLog("PHASE0", "Discovered contacts: ${contactList.take(10).joinToString(", ")}${if (contactList.size > 10) "..." else ""}")
         
         return contactList
     }
@@ -4728,10 +4703,6 @@ class WireAutomationService : AccessibilityService() {
         var contactsProcessed = 0
         var contactsSent = 0
         val contactResults = mutableListOf<com.wireautomessenger.model.ContactResult>()
-        
-        // Track sent contacts to prevent duplicates
-        val sentContactNames = mutableSetOf<String>()
-        
         val reportFile = File(getExternalFilesDir(null), "automation_report.txt")
         
         // Initialize report file with FileWriter for proper flushing
@@ -4753,26 +4724,6 @@ class WireAutomationService : AccessibilityService() {
             
             for ((index, contactName) in batch.withIndex()) {
                 val globalIndex = batchStart + index
-                
-                // Normalize contact name for duplicate detection
-                val normalizedName = contactName.trim().lowercase()
-                
-                // Skip if already sent to this contact (prevent duplicates)
-                if (sentContactNames.contains(normalizedName)) {
-                    android.util.Log.w("WireAuto", "⚠️ SKIPPING DUPLICATE: Already sent message to '$contactName' (normalized: '$normalizedName')")
-                    debugLog("WARN", "Skipping duplicate contact: $contactName")
-                    contactResults.add(com.wireautomessenger.model.ContactResult(
-                        name = contactName,
-                        status = com.wireautomessenger.model.ContactStatus.SKIPPED,
-                        errorMessage = "Duplicate contact (already sent message)",
-                        position = globalIndex + 1
-                    ))
-                    reportWriter.append("${dateFormat.format(Date())} | SKIPPED | $contactName | Duplicate contact\n")
-                    reportWriter.flush()
-                    sendContactUpdate(contactName, "skipped", globalIndex + 1, "Duplicate contact")
-                    continue
-                }
-                
                 contactsProcessed++
                 
                 try {
@@ -4805,8 +4756,6 @@ class WireAutomationService : AccessibilityService() {
                     
                     if (messageSent) {
                         contactsSent++
-                        // Mark as sent to prevent duplicates
-                        sentContactNames.add(normalizedName)
                         contactResults.add(com.wireautomessenger.model.ContactResult(
                             name = contactName,
                             status = com.wireautomessenger.model.ContactStatus.SENT,
@@ -4817,7 +4766,6 @@ class WireAutomationService : AccessibilityService() {
                         reportWriter.flush() // Flush to ensure report is updated immediately after each contact
                         sendContactUpdate(contactName, "sent", globalIndex + 1, null)
                         debugLog("SUCCESS", "Message sent successfully to $contactName")
-                        android.util.Log.i("WireAuto", "✓ Message sent to $contactName (${contactsSent}/${contactNames.size})")
                     } else {
                         contactResults.add(com.wireautomessenger.model.ContactResult(
                             name = contactName,
@@ -4828,7 +4776,6 @@ class WireAutomationService : AccessibilityService() {
                         reportWriter.append("${dateFormat.format(Date())} | FAILED | $contactName | Failed to send message\n")
                         reportWriter.flush() // Flush to ensure report is updated immediately after each contact
                         sendContactUpdate(contactName, "failed", globalIndex + 1, "Failed to send message")
-                        android.util.Log.w("WireAuto", "✗ Failed to send message to $contactName")
                     }
                     
                     // Phase 4: Return to main screen after each message
@@ -5354,56 +5301,33 @@ class WireAutomationService : AccessibilityService() {
         
         val normalizedQuery = normalizeForMatch(sanitizedQuery)
         
-        android.util.Log.d("SEARCH_MATCH", "Normalized query: '$normalizedQuery' (from '$sanitizedQuery')")
-        debugLog("SEARCH_MATCH", "Normalized query: '$normalizedQuery'")
-        
-        // Log all valid results with normalized names for debugging
-        validResults.forEach { (_, name) ->
-            val normalized = normalizeForMatch(name)
-            android.util.Log.d("SEARCH_MATCH", "  Valid result: '$name' -> normalized: '$normalized'")
-        }
-        
-        // Priority 1: Try exact match (with normalization) - BEST MATCH
+        // Try exact match (with normalization)
         for ((node, contactName) in validResults) {
             val normalizedName = normalizeForMatch(contactName)
             if (normalizedName == normalizedQuery) {
-                android.util.Log.d("SEARCH_MATCH", "✓ Exact match found: '$contactName' (normalized: '$normalizedName' == '$normalizedQuery')")
+                android.util.Log.d("SEARCH_MATCH", "✓ Exact match: $contactName")
                 debugLog("SEARCH_MATCH", "✓ Exact match: $contactName")
                 return node
             }
         }
         
-        // Priority 2: Try exact match on original names (case-insensitive)
+        // Try partial match (both directions, with normalization)
         for ((node, contactName) in validResults) {
-            if (contactName.trim().lowercase() == sanitizedQuery) {
-                android.util.Log.d("SEARCH_MATCH", "✓ Exact match (original): '$contactName' == '$sanitizedQuery'")
-                debugLog("SEARCH_MATCH", "✓ Exact match (original): $contactName")
+            val normalizedName = normalizeForMatch(contactName)
+            if (normalizedName.contains(normalizedQuery) || normalizedQuery.contains(normalizedName)) {
+                android.util.Log.d("SEARCH_MATCH", "✓ Partial match: $contactName (normalized: $normalizedName vs $normalizedQuery)")
+                debugLog("SEARCH_MATCH", "✓ Partial match: $contactName")
                 return node
             }
         }
         
-        // Priority 3: Try fuzzy match - check if normalized strings start with each other (for cases like "MAsad" vs "M.Asad")
-        // This is more specific than partial match
+        // Try fuzzy match: check if normalized strings are similar (for cases like "MAsad" vs "M.Asad")
         for ((node, contactName) in validResults) {
             val normalizedName = normalizeForMatch(contactName)
-            // Check if one starts with the other (more specific than contains)
+            // Check if one starts with the other or vice versa
             if (normalizedName.startsWith(normalizedQuery) || normalizedQuery.startsWith(normalizedName)) {
-                // Only match if the shorter one is at least 3 chars to avoid false matches
-                val minLength = minOf(normalizedName.length, normalizedQuery.length)
-                if (minLength >= 3) {
-                    android.util.Log.d("SEARCH_MATCH", "✓ Fuzzy match: '$contactName' (normalized: '$normalizedName' starts with '$normalizedQuery' or vice versa)")
-                    debugLog("SEARCH_MATCH", "✓ Fuzzy match: $contactName")
-                    return node
-                }
-            }
-        }
-        
-        // Priority 4: Try partial match (both directions, with normalization) - LAST RESORT
-        for ((node, contactName) in validResults) {
-            val normalizedName = normalizeForMatch(contactName)
-            if (normalizedName.contains(normalizedQuery) || normalizedQuery.contains(normalizedName)) {
-                android.util.Log.d("SEARCH_MATCH", "✓ Partial match: '$contactName' (normalized: '$normalizedName' contains '$normalizedQuery' or vice versa)")
-                debugLog("SEARCH_MATCH", "✓ Partial match: $contactName")
+                android.util.Log.d("SEARCH_MATCH", "✓ Fuzzy match: $contactName (normalized: $normalizedName starts with $normalizedQuery or vice versa)")
+                debugLog("SEARCH_MATCH", "✓ Fuzzy match: $contactName")
                 return node
             }
         }
