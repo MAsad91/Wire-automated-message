@@ -4891,17 +4891,15 @@ class WireAutomationService : AccessibilityService() {
         searchInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundleClear)
         delay(300)
         
-        // Type sanitized name character-by-character with 100ms delay
+        // Type full contact name at once (not character-by-character)
         // IMPORTANT: We're typing the CONTACT NAME here, NOT the message text
-        android.util.Log.d("SEARCH", "Typing CONTACT NAME into search bar: '$sanitizedName' (original: '$contactName')")
-        debugLog("SEARCH", "Typing sanitized contact name character-by-character: $sanitizedName")
+        android.util.Log.d("SEARCH", "Typing FULL CONTACT NAME into search bar: '$sanitizedName' (original: '$contactName')")
+        debugLog("SEARCH", "Typing full contact name at once: $sanitizedName")
         debugLog("SEARCH", "IMPORTANT: Typing CONTACT NAME, NOT message text")
-        for (char in sanitizedName) {
-            val bundle = android.os.Bundle()
-            bundle.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, char.toString())
-            searchInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
-            delay(100) // Human-like typing delay
-        }
+        val bundle = android.os.Bundle()
+        bundle.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, sanitizedName)
+        searchInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)
+        delay(500) // Small delay after typing full name
         
         // Increase search wait: Give search results extra 2 seconds to fully load
         delay(3500) // Wait for search results to populate (1500ms + 2000ms extra)
